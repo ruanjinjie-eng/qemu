@@ -757,6 +757,8 @@ typedef struct CPUArchState {
     struct CPUBreakpoint *cpu_breakpoint[16];
     struct CPUWatchpoint *cpu_watchpoint[16];
 
+    uint64_t mpam0_el1;
+    uint64_t mpam1_el1;
     /* Optional fault info across tlb lookup. */
     ARMMMUFaultInfo *tlb_fi;
 
@@ -1121,6 +1123,7 @@ struct ArchCPU {
         uint32_t dbgdevid;
         uint32_t dbgdevid1;
         uint64_t reset_pmcr_el0;
+        uint64_t mpamidr_el1;
         uint64_t idregs[NUM_ID_IDX];
     } isar;
     uint64_t midr;

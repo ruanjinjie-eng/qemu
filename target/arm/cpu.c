@@ -439,6 +439,8 @@ static void arm_cpu_reset_hold(Object *obj, ResetType type)
         /* Sample rvbar at reset.  */
         env->cp15.rvbar = cpu->rvbar_prop;
         env->pc = env->cp15.rvbar;
+
+        env->mpam1_el1 = R_MPAM1_EL1_MPAMEN_MASK;
 #endif
     } else {
 #if defined(CONFIG_USER_ONLY)
@@ -452,6 +454,8 @@ static void arm_cpu_reset_hold(Object *obj, ResetType type)
             env->cp15.rvbar = cpu->rvbar_prop;
             env->regs[15] = cpu->rvbar_prop;
         }
+
+        env->mpam1_el1 = R_MPAM1_EL1_MPAMEN_MASK;
     }
 
 #if defined(CONFIG_USER_ONLY)
@@ -2333,7 +2337,11 @@ static void arm_cpu_realizefn(DeviceState *dev, Error **errp)
         FIELD_DP64_IDREG(isar, ID_AA64PFR0, AMU, 0);
         FIELD_DP32_IDREG(isar, ID_PFR0, AMU, 0);
         /* FEAT_MPAM (Memory Partitioning and Monitoring Extension) */
-        FIELD_DP64_IDREG(isar, ID_AA64PFR0, MPAM, 0);
+        FIELD_DP64_IDREG(isar, ID_AA64PFR0, MPAM, 1);
+        cpu->isar.mpamidr_el1 =
+            FIELD_DP64(cpu->isar.mpamidr_el1, MPAMIDR, PARTID_MAX, 63);
+        cpu->isar.mpamidr_el1 =
+            FIELD_DP64(cpu->isar.mpamidr_el1, MPAMIDR, PMG_MAX, 3);
     }
 
     /* MPU can be configured out of a PMSA CPU either by setting has-mpu

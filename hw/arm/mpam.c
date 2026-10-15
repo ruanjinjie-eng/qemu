@@ -991,6 +991,18 @@ static void mpam_msc_mem_realize(DeviceState *dev, Error **errp)
         mpamf->idr = FIELD_DP64(mpamf->idr, MPAMF_IDR, HAS_MSMON, 1);
         /* Memory specific bit */
         mpamf->idr = FIELD_DP64(mpamf->idr, MPAMF_IDR, HAS_MBW_PART, 1);
+        /*
+         * Priority partitioning on the memory side too: the driver exposes
+         * the MBPRI pseudo-resource from the class backing MBA, which
+         * requires the memory-side MSC to advertise HAS_PRI_PART.
+         */
+        mpamf->idr = FIELD_DP64(mpamf->idr, MPAMF_IDR, HAS_PRI_PART, 1);
+        mpamf->pri_idr = FIELD_DP32(mpamf->pri_idr, MPAMF_PRI_IDR,
+                                    HAS_INTPRI, 1);
+        mpamf->pri_idr = FIELD_DP32(mpamf->pri_idr, MPAMF_PRI_IDR,
+                                    INTPRI_0_IS_LOW, 1);
+        mpamf->pri_idr = FIELD_DP32(mpamf->pri_idr, MPAMF_PRI_IDR,
+                                    INTPRI_WD, 2);
 
         mpamf->msmon_idr = FIELD_DP32(mpamf->msmon_idr,
                                       MPAMF_MSMON_IDR, MSMON_MBWU, 1);

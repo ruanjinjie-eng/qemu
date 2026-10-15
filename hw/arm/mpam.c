@@ -363,6 +363,13 @@ static uint64_t mpam_msc_read_reg(void *opaque, hwaddr offset,
             return 0;
         }
         return mpamf->cpor_idr;
+    case A_MPAMF_CCAP_IDR:
+        if (!FIELD_EX32(mpamf->idr, MPAMF_IDR, HAS_CCAP_PART)) {
+            qemu_log_mask(LOG_UNIMP,
+                "MPAM: Unexpected read of CCAP_IDR with no CCAP support\n");
+            return 0;
+        }
+        return mpamf->ccap_idr;
     case A_MPAMF_MBW_IDR:
         return mpamf->mbw_idr;
     case A_MPAMF_PRI_IDR:
@@ -383,6 +390,13 @@ static uint64_t mpam_msc_read_reg(void *opaque, hwaddr offset,
         return mpamf->mbwumon_idr;
     case A_MPAMF_CFG_PART_SEL:
         return mpamf->cfg_part_sel;
+    case A_MPAMF_MPAMCFG_CMAX:
+        if (!FIELD_EX32(mpamf->idr, MPAMF_IDR, HAS_CCAP_PART)) {
+            qemu_log_mask(LOG_UNIMP,
+                "MPAM: Unexpected read of CMAX with no CCAP support\n");
+            return 0;
+        }
+        return mpamf->per_nrw_id[nrw_part_sel].cfg_cmax;
     case A_MPAMF_MPAMCFG_MBW_MIN:
         return mpamf->per_nrw_id[nrw_part_sel].cfg_mbw_min;
     case A_MPAMF_MPAMCFG_MBW_MAX:
@@ -459,6 +473,14 @@ static void mpam_msc_write_reg(void *opaque, hwaddr offset, uint64_t value,
         s->internal_part_sel = FIELD_EX32(value, MPAMF_CFG_PART_SEL, INTERNAL);
         mpamf = &s->mpamf[s->ris];
         mpamf->cfg_part_sel = value;
+        return;
+    case A_MPAMF_MPAMCFG_CMAX:
+        if (value & ~MPAMF_MPAMCFG_CMAX_WRITE_MASK) {
+            qemu_log_mask(LOG_UNIMP,
+                          "MPAM: Unexpected write to CMAX Mask=%x Value=%lx\n",
+                          MPAMF_MPAMCFG_CMAX_WRITE_MASK, value);
+        }
+        mpamf->per_nrw_id[nrw_part_sel].cfg_cmax = value;
         return;
     case A_MPAMF_MPAMCFG_MBW_MIN:
         if (value & ~MPAMF_MPAMCFG_CMIN_WRITE_MASK) {
@@ -675,6 +697,7 @@ static void mpam_msc_cache_realize(DeviceState *dev, Error **errp)
 
         /* Cache specific bit */
         mpamf->idr = FIELD_DP64(mpamf->idr, MPAMF_IDR, HAS_CPOR_PART, 1);
+        mpamf->idr = FIELD_DP64(mpamf->idr, MPAMF_IDR, HAS_CCAP_PART, 1);
         mpamf->idr = FIELD_DP64(mpamf->idr, MPAMF_IDR, HAS_PRI_PART, 1);
         mpamf->idr = FIELD_DP64(mpamf->idr, MPAMF_IDR, HAS_PARTID_NRW,
                                 s->num_int_partid < s->num_partid);
@@ -700,6 +723,20 @@ static void mpam_msc_cache_realize(DeviceState *dev, Error **errp)
                                     INTPRI_0_IS_LOW, 1);
         mpamf->pri_idr = FIELD_DP32(mpamf->pri_idr, MPAMF_PRI_IDR,
                                     INTPRI_WD, 2);
+
+        /* Capacity Partitioning */
+        mpamf->ccap_idr = FIELD_DP32(mpamf->ccap_idr, MPAMF_CCAP_IDR,
+                                     HAS_CMAX_SOFTLIM, 1);
+        mpamf->ccap_idr = FIELD_DP32(mpamf->ccap_idr, MPAMF_CCAP_IDR,
+                                     NO_CMAX, 0);
+        mpamf->ccap_idr = FIELD_DP32(mpamf->ccap_idr, MPAMF_CCAP_IDR,
+                                     HAS_CMIN, 1);
+        mpamf->ccap_idr = FIELD_DP32(mpamf->ccap_idr, MPAMF_CCAP_IDR,
+                                     HAS_CASSOC, 1);
+        mpamf->ccap_idr = FIELD_DP32(mpamf->ccap_idr, MPAMF_CCAP_IDR,
+                                     CASSOC_WD, 4); /* Not much flex on this */
+        mpamf->ccap_idr = FIELD_DP32(mpamf->ccap_idr, MPAMF_CCAP_IDR,
+                                     CMAX_WD, 4);
 
         if (s->num_int_partid < s->num_partid) {
             mpamf->partid_nrw_idr = FIELD_DP32(mpamf->partid_nrw_idr,

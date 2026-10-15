@@ -354,6 +354,14 @@ typedef struct MPAMMSCState {
     uint64_t csu_capacity;
 
     /*
+     * MPAMF_ECR / MPAMF_ESR are single per-MSC registers (IHI 0099 4.3),
+     * independent of the RIS selection.  The 64-bit ESR records the RIS
+     * the error was detected against in its top half.
+     */
+    uint32_t ecr;
+    uint64_t esr;
+
+    /*
      * Wired-interrupt GSIVs the board assigned (INTID = SPI + 32).  Zero
      * means "no wired interrupt"; the ACPI MPAM table reports them as-is.
      */
@@ -407,6 +415,20 @@ static uint32_t mpam_nrw_id_for(MPAMMSCState *s, Mpamf *mf, uint32_t partid)
 
     intpartid = mf->cfg_intpartid[partid % s->num_partid];
     return intpartid % s->num_int_partid;
+}
+
+/*
+ * Keep the per-RIS copies in Mpamf (exported through the QMP/PPTT path)
+ * in sync with the MSC-level ECR/ESR view the MMIO handlers use.
+ */
+static void mpam_msc_sync_esr_ecr(MPAMMSCState *s)
+{
+    int i;
+
+    for (i = 0; i < s->num_ris; i++) {
+        s->mpamf[i].ecr = s->ecr;
+        s->mpamf[i].esr = (uint32_t)s->esr;
+    }
 }
 
 static Mpamf *mpam_mon_ris(MPAMMSCState *s)
@@ -685,9 +707,16 @@ static uint64_t mpam_msc_read_reg(void *opaque, hwaddr offset,
     case A_MPAMF_ERR_MSI_ATTR:
         return mpamf->err_msi_attr;
     case A_MPAMF_ECR:
-        return mpamf->ecr;
+        return s->ecr;
     case A_MPAMF_ESR:
-        return mpamf->esr;
+        return s->esr;
+    case A_MPAMF_ESR + 0x4:
+        if (!FIELD_EX32(mpamf->idr, MPAMF_IDR, EXT)) {
+            qemu_log_mask(LOG_UNIMP,
+                          "MPAM: Unexpected read of extended ESR\n");
+            return 0;
+        }
+        return s->esr >> 32;
     case A_MPAMF_CFG_PART_SEL:
         return mpamf->cfg_part_sel;
     case A_MPAMF_MPAMCFG_INTPARTID: {
@@ -975,7 +1004,20 @@ static void mpam_msc_write_reg(void *opaque, hwaddr offset, uint64_t value,
                           "MPAM: Unexpected write to ECR Mask=%x Value=%lx\n",
                           MPAMF_ECR_WRITE_MASK, value);
         }
-        mpamf->ecr = value;
+        s->ecr = value & MPAMF_ECR_WRITE_MASK;
+        mpam_msc_sync_esr_ecr(s);
+        return;
+    case A_MPAMF_ESR:
+        /*
+         * Software clears an error by writing ERRCODE as zero; writing a
+         * non-zero ERRCODE activates the level error interrupt (8.2).
+         */
+        s->esr = deposit64(s->esr, 0, 32, value);
+        mpam_msc_sync_esr_ecr(s);
+        return;
+    case A_MPAMF_ESR + 0x4:
+        s->esr = deposit64(s->esr, 32, 32, value);
+        mpam_msc_sync_esr_ecr(s);
         return;
     default:
         qemu_log_mask(LOG_UNIMP,

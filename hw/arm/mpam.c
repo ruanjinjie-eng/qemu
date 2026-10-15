@@ -260,6 +260,8 @@ typedef struct MpamfPerNrwId {
         uint32_t cfg_mbw_pbm[(MPAM_MBW_PART + 31) / 32];
         uint32_t cfg_pri;
         uint32_t cfg_cmax;
+        uint32_t cfg_cmin;
+        uint32_t cfg_cassoc;
         uint32_t cfg_mbw_min;
         uint32_t cfg_mbw_max;
         uint32_t cfg_mbw_prop;
@@ -635,6 +637,20 @@ static uint64_t mpam_msc_read_reg(void *opaque, hwaddr offset,
             return 0;
         }
         return mpamf->per_nrw_id[nrw_part_sel].cfg_cmax;
+    case A_MPAMF_MPAMCFG_CMIN:
+        if (!FIELD_EX32(mpamf->idr, MPAMF_IDR, HAS_CCAP_PART)) {
+            qemu_log_mask(LOG_UNIMP,
+                "MPAM: Unexpected read of CMIN with no CCAP support\n");
+            return 0;
+        }
+        return mpamf->per_nrw_id[nrw_part_sel].cfg_cmin;
+    case A_MPAMF_MPAMCFG_CASSOC:
+        if (!FIELD_EX32(mpamf->idr, MPAMF_IDR, HAS_CCAP_PART)) {
+            qemu_log_mask(LOG_UNIMP,
+                "MPAM: Unexpected read of CASSOC with no CCAP support\n");
+            return 0;
+        }
+        return mpamf->per_nrw_id[nrw_part_sel].cfg_cassoc;
     case A_MPAMF_MPAMCFG_MBW_MIN:
         return mpamf->per_nrw_id[nrw_part_sel].cfg_mbw_min;
     case A_MPAMF_MPAMCFG_MBW_MAX:
@@ -746,11 +762,27 @@ static void mpam_msc_write_reg(void *opaque, hwaddr offset, uint64_t value,
         }
         mpamf->per_nrw_id[nrw_part_sel].cfg_cmax = value;
         return;
-    case A_MPAMF_MPAMCFG_MBW_MIN:
+    case A_MPAMF_MPAMCFG_CMIN:
         if (value & ~MPAMF_MPAMCFG_CMIN_WRITE_MASK) {
             qemu_log_mask(LOG_UNIMP,
-                          "MPAM: Unexpected write to CMAX Mask=%x Value=%lx\n",
+                          "MPAM: Unexpected write to CMIN Mask=%x Value=%lx\n",
                           MPAMF_MPAMCFG_CMIN_WRITE_MASK, value);
+        }
+        mpamf->per_nrw_id[nrw_part_sel].cfg_cmin = value;
+        return;
+    case A_MPAMF_MPAMCFG_CASSOC:
+        if (value & ~MPAMF_MPAMCFG_CASSOC_WRITE_MASK) {
+            qemu_log_mask(LOG_UNIMP,
+                          "MPAM: Unexpected write to CASSOC Mask=%x Value=%lx\n",
+                          MPAMF_MPAMCFG_CASSOC_WRITE_MASK, value);
+        }
+        mpamf->per_nrw_id[nrw_part_sel].cfg_cassoc = value;
+        return;
+    case A_MPAMF_MPAMCFG_MBW_MIN:
+        if (value & ~MPAMF_MPAMCFG_MBW_MIN_WRITE_MASK) {
+            qemu_log_mask(LOG_UNIMP,
+                          "MPAM: Unexpected write to MBW_MIN Mask=%x Value=%lx\n",
+                          MPAMF_MPAMCFG_MBW_MIN_WRITE_MASK, value);
         }
         mpamf->per_nrw_id[nrw_part_sel].cfg_mbw_min = value;
         return;

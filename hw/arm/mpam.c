@@ -329,6 +329,8 @@ static uint64_t mpam_msc_read_reg(void *opaque, hwaddr offset,
         return mpamf->csumon_idr;
     case A_MPAMF_MBWUMON_IDR:
         return mpamf->mbwumon_idr;
+    case A_MPAMF_CFG_PART_SEL:
+        return mpamf->cfg_part_sel;
     default:
         qemu_log_mask(LOG_UNIMP,
                       "MPAM: Unexpected read of %lx\n", offset);
@@ -339,7 +341,37 @@ static uint64_t mpam_msc_read_reg(void *opaque, hwaddr offset,
 static void mpam_msc_write_reg(void *opaque, hwaddr offset, uint64_t value,
                                unsigned size)
 {
+    MPAMMSCState *s = MPAM_MSC_DEVICE(opaque);
+    /* Update in the ris setting path */
+    Mpamf *mpamf = &s->mpamf[s->ris];
+
     switch (offset) {
+    case A_MPAMF_CFG_PART_SEL:
+        if (value & ~MPAMF_CFG_PART_SEL_WRITE_MASK) {
+            qemu_log_mask(LOG_UNIMP,
+                          "MPAM: Unexpected write to CFG_PART_SEL Mask=%x Value=%lx\n",
+                          MPAMF_CFG_PART_SEL_WRITE_MASK, value);
+        }
+        /* Field matches for all RIS */
+        if (!FIELD_EX64(mpamf->idr, MPAMF_IDR, HAS_RIS) &&
+            FIELD_EX32(value, MPAMF_CFG_PART_SEL, RIS) != 0) {
+            qemu_log_mask(LOG_UNIMP,
+                          "MPAM: Unexpected write of non 0 RIS on MSC with !HAS_RIS\n");
+            return;
+        }
+        if (FIELD_EX32(value, MPAMF_CFG_PART_SEL, RIS) >= s->num_ris) {
+            qemu_log_mask(LOG_GUEST_ERROR,
+                          "MPAM: RIS %d out of range (num-ris %d)\n",
+                          FIELD_EX32(value, MPAMF_CFG_PART_SEL, RIS),
+                          s->num_ris);
+            return;
+        }
+        s->ris = FIELD_EX32(value, MPAMF_CFG_PART_SEL, RIS);
+        s->part_sel = FIELD_EX32(value, MPAMF_CFG_PART_SEL, PARTID_SEL);
+        s->internal_part_sel = FIELD_EX32(value, MPAMF_CFG_PART_SEL, INTERNAL);
+        mpamf = &s->mpamf[s->ris];
+        mpamf->cfg_part_sel = value;
+        return;
     default:
         qemu_log_mask(LOG_UNIMP,
                       "MPAM: Write to unexpected register Addr %lx Value=%lx\n",

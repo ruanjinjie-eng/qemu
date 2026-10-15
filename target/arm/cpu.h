@@ -761,6 +761,7 @@ typedef struct CPUArchState {
     uint64_t mpam1_el1;
     uint64_t mpam2_el2;
     uint64_t mpamhcr_el2;
+    uint64_t mpamsm_el1;
     /* Optional fault info across tlb lookup. */
     ARMMMUFaultInfo *tlb_fi;
 

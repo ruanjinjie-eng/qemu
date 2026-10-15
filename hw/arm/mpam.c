@@ -1041,6 +1041,63 @@ static const MemoryRegionOps mpam_msc_ops = {
     },
 };
 
+
+/*
+ * Power-on state of the MSC, shared between realize and reset: ID narrowing
+ * map identity-wrapped, partition config at reset values, monitors off.
+ */
+static void mpam_msc_state_init(MPAMMSCState *s)
+{
+    int i;
+
+    s->ris = 0;
+    s->part_sel = 0;
+    s->internal_part_sel = false;
+    s->mon_sel = 0;
+    s->ecr = 0;
+    s->esr = 0;
+
+    for (i = 0; i < s->num_ris; i++) {
+        Mpamf *mpamf = &s->mpamf[i];
+        int p;
+
+        mpamf->ecr = 0;
+        mpamf->esr = 0;
+        memset(mpamf->per_nrw_id, 0,
+               sizeof(MpamfPerNrwId) * s->num_int_partid);
+        memset(mpamf->cfg_intpartid, 0,
+               sizeof(uint32_t) * s->num_partid);
+        memset(mpamf->mbwu_mons, 0,
+               sizeof(MpamMbwuMon) * s->num_mbwu_mon);
+        memset(mpamf->csu_mons, 0, sizeof(MpamCsuMon) * s->num_csu_mon);
+
+        /*
+         * Until resctrl programs the map, wrap each request PARTID onto an
+         * internal PARTID so the narrowing indirection is always in range.
+         */
+        for (p = 0; p < s->num_partid; p++) {
+            mpamf->cfg_intpartid[p] = p % s->num_int_partid;
+        }
+        /*
+         * per_nrw_id is indexed by INTERNAL PARTID: it has
+         * num_int_partid entries, not num_partid.  Writing it with the
+         * request-PARTID count overflowed the allocation by 224 entries
+         * (malloc(): corrupted top size once the struct grew).
+         */
+        for (p = 0; p < s->num_int_partid; p++) {
+            /* MBW_MAX resets to full bandwidth on real hardware */
+            mpamf->per_nrw_id[p].cfg_mbw_max = 0xffff;
+        }
+    }
+}
+
+static void mpam_msc_reset(DeviceState *dev)
+{
+    MPAMMSCState *s = MPAM_MSC_DEVICE(dev);
+
+    mpam_msc_state_init(s);
+}
+
 static void mpam_msc_realize(DeviceState *dev, Error **errp)
 {
     MPAMMSCState *s = MPAM_MSC_DEVICE(dev);
@@ -1052,7 +1109,7 @@ static void mpam_msc_realize(DeviceState *dev, Error **errp)
         return;
     }
     if (s->num_partid == 0) {
-        error_setg(errp, "num-ris must be <= 16");
+        error_setg(errp, "num-partid must be nonzero");
         return;
     }
     if (s->num_int_partid == 0) {
@@ -1061,28 +1118,12 @@ static void mpam_msc_realize(DeviceState *dev, Error **errp)
 
     s->mpamf = g_new0(Mpamf, s->num_ris);
     for (i = 0; i < s->num_ris; i++) {
-        int p;
-
         s->mpamf[i].per_nrw_id = g_new0(MpamfPerNrwId, s->num_int_partid);
         s->mpamf[i].cfg_intpartid = g_new0(uint32_t, s->num_partid);
         s->mpamf[i].mbwu_mons = g_new0(MpamMbwuMon, s->num_mbwu_mon);
         s->mpamf[i].csu_mons = g_new0(MpamCsuMon, s->num_csu_mon);
-        /*
-         * Until resctrl programs the map, wrap each request PARTID onto an
-         * internal PARTID so the narrowing indirection is always in range.
-         */
-        for (p = 0; p < s->num_partid; p++) {
-            s->mpamf[i].cfg_intpartid[p] = p % s->num_int_partid;
-        }
-        /*
-         * per_nrw_id is indexed by INTERNAL PARTID: it has num_int_partid
-         * entries, not num_partid.
-         */
-        for (p = 0; p < s->num_int_partid; p++) {
-            /* MBW_MAX resets to full bandwidth on real hardware */
-            s->mpamf[i].per_nrw_id[p].cfg_mbw_max = 0xffff;
-        }
     }
+    mpam_msc_state_init(s);
 
     memory_region_init_io(&s->mr, OBJECT(s), &mpam_msc_ops, s, "mpam_msc",
                           MPAM_SIZE);
@@ -1301,6 +1342,7 @@ static void mpam_msc_init(ObjectClass *klass, const void *data)
     DeviceClass *dc = DEVICE_CLASS(klass);
 
     device_class_set_props(dc, mpam_msc_props);
+    device_class_set_legacy_reset(dc, mpam_msc_reset);
 }
 
 static void mpam_msc_mem_init(ObjectClass *klass, const void *data)

@@ -222,6 +222,16 @@ REG32(MPAMF_MPAMCFG_MBW_PBM0, 0x2000)
 /* MPAMF_IIDR.IMPLEMENTER: ARM JEP106 code for Huawei (0x736). */
 #define MPAM_IIDR_IMPLEMENTER 0x736
 
+typedef struct MpamfPerNrwId {
+        uint32_t cfg_cpbm[(MPAM_CACHE_PART + 31) / 32];
+        uint32_t cfg_mbw_pbm[(MPAM_MBW_PART + 31) / 32];
+        uint32_t cfg_pri;
+        uint32_t cfg_cmax;
+        uint32_t cfg_mbw_min;
+        uint32_t cfg_mbw_max;
+        uint32_t cfg_mbw_prop;
+} MpamfPerNrwId;
+
 typedef struct Mpamf {
     uint64_t idr;
     uint32_t iidr;
@@ -243,6 +253,10 @@ typedef struct Mpamf {
     uint32_t ecr;
     uint32_t esr;
     uint32_t cfg_part_sel;
+    uint32_t *cfg_intpartid;
+
+    MpamfPerNrwId *per_nrw_id;
+
 } Mpamf;
 
 typedef struct MPAMMSCState {
@@ -259,6 +273,27 @@ typedef struct MPAMMSCState {
     uint8_t num_ris;
 
 } MPAMMSCState;
+
+/*
+ * ID narrowing may be in effect.  If it is there is an indirection
+ * table per RIS mapping from part_sel to the internal ID. To make things
+ * more complex, the Partition selection register can directly address
+ * internal IDs. That works for everything other than the ID map itself.
+ * This function pulls the right internal ID out of this complexity
+ * for use in accessing the per_nrw_id structures.
+ */
+static uint32_t mpam_get_nrw_id(MPAMMSCState *s)
+{
+    Mpamf *mpamf = &s->mpamf[s->ris];
+
+    if (!FIELD_EX32(mpamf->idr, MPAMF_IDR, HAS_PARTID_NRW)) {
+        return s->part_sel;
+    }
+    if (s->internal_part_sel) {
+        return s->part_sel;
+    }
+    return mpamf->cfg_intpartid[s->part_sel];
+}
 
 typedef struct MPAMMSCMemState {
     MPAMMSCState parent;
@@ -285,6 +320,7 @@ static uint64_t mpam_msc_read_reg(void *opaque, hwaddr offset,
 {
     MPAMMSCState *s = MPAM_MSC_DEVICE(opaque);
     Mpamf *mpamf = &s->mpamf[s->ris];
+    uint32_t nrw_part_sel = mpam_get_nrw_id(s);
 
     switch (offset) {
     case A_MPAMF_IDR:
@@ -344,6 +380,8 @@ static void mpam_msc_write_reg(void *opaque, hwaddr offset, uint64_t value,
     MPAMMSCState *s = MPAM_MSC_DEVICE(opaque);
     /* Update in the ris setting path */
     Mpamf *mpamf = &s->mpamf[s->ris];
+    /* Update if cfg_intpartid being touched */
+    uint32_t nrw_part_sel = mpam_get_nrw_id(s);
 
     switch (offset) {
     case A_MPAMF_CFG_PART_SEL:
@@ -397,6 +435,7 @@ static const MemoryRegionOps mpam_msc_ops = {
 static void mpam_msc_realize(DeviceState *dev, Error **errp)
 {
     MPAMMSCState *s = MPAM_MSC_DEVICE(dev);
+    int i;
 
     /* IHI 0099: MPAMF_CFG_PART_SEL.RIS is 4 bits, so at most 16 RIS. */
     if (s->num_ris > 16) {
@@ -412,6 +451,11 @@ static void mpam_msc_realize(DeviceState *dev, Error **errp)
     }
 
     s->mpamf = g_new0(Mpamf, s->num_ris);
+    for (i = 0; i < s->num_ris; i++) {
+        s->mpamf[i].per_nrw_id = g_new0(MpamfPerNrwId, s->num_int_partid);
+        s->mpamf[i].cfg_intpartid = g_new0(uint32_t, s->num_partid);
+    }
+
     memory_region_init_io(&s->mr, OBJECT(s), &mpam_msc_ops, s, "mpam_msc",
                           MPAM_SIZE);
     sysbus_init_mmio(SYS_BUS_DEVICE(dev), &s->mr);

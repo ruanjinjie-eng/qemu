@@ -90,6 +90,7 @@
 #include "hw/virtio/virtio-md-pci.h"
 #include "hw/virtio/virtio-iommu.h"
 #include "hw/char/pl011.h"
+#include "hw/arm/mpam.h"
 #include "hw/core/cpu.h"
 #include "hw/cxl/cxl.h"
 #include "hw/cxl/cxl_host.h"
@@ -211,6 +212,8 @@ static const MemMapEntry base_memmap[] = {
     [VIRT_SECURE_GPIO] =        { 0x090b0000, 0x00001000 },
     [VIRT_ACPI_PCIHP] =         { 0x090c0000, ACPI_PCIHP_SIZE },
     [VIRT_MMIO] =               { 0x0a000000, 0x00000200 },
+    /* MPAM MSC MMIO windows: MPAM_SIZE (16 KiB) each, 256 slots (1 MiB). */
+    [VIRT_MPAM_MSC] =           { 0x0b006000, MPAM_SIZE * 256 },
     /* ...repeating for a total of NUM_VIRTIO_TRANSPORTS, each of that size */
     [VIRT_PLATFORM_BUS] =       { 0x0c000000, 0x02000000 },
     [VIRT_SECURE_MEM] =         { 0x0e000000, 0x01000000 },

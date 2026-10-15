@@ -2144,6 +2144,60 @@ static void create_virtio_iommu_dt_bindings(VirtMachineState *vms)
 #define MPAM_VIRT_NUM_PARTID     256
 #define MPAM_VIRT_NUM_INTPARTID  32
 
+static void create_mpam_msc_cache(VirtMachineState *vms, int level,
+                                  hwaddr *base)
+{
+    MachineState *ms = MACHINE(vms);
+    const CPUArchIdList *cpu_list = ms->possible_cpus;
+    DeviceState *dev;
+    int step, i;
+    CpuTopologyLevel topo;
+
+    /*
+     * Work out how many CPUs share a cache at this level, so each MSC
+     * covers exactly one cache, and the cache_id (derived from the
+     * first CPU of the group) matches the PPTT cache node the MPAM
+     * table points at.
+     */
+    topo = (level == 3) ?
+        machine_get_cache_topo_level(ms, CACHE_LEVEL_AND_TYPE_L3) :
+        machine_get_cache_topo_level(ms, CACHE_LEVEL_AND_TYPE_L2);
+
+    if (topo == CPU_TOPOLOGY_LEVEL_SOCKET && ms->smp.sockets > 0) {
+        step = cpu_list->len / ms->smp.sockets;
+    } else if (topo == CPU_TOPOLOGY_LEVEL_CLUSTER && ms->smp.clusters > 0) {
+        /*
+         * ms->smp.clusters is per socket; possible_cpus is ordered
+         * socket-major, so dividing by the total cluster count keeps
+         * each group inside one cluster.
+         */
+        step = cpu_list->len / (ms->smp.sockets * ms->smp.clusters);
+    } else {
+        step = ms->smp.threads;
+    }
+    if (step < 1) {
+        step = 1;
+    }
+
+    for (i = 0; i < cpu_list->len; i += step) {
+        dev = qdev_new(TYPE_MPAM_MSC_CACHE);
+        object_property_set_uint(OBJECT(dev), "num-ris", 1, &error_fatal);
+        object_property_set_uint(OBJECT(dev), "num-partid",
+                                 MPAM_VIRT_NUM_PARTID, &error_fatal);
+        object_property_set_uint(OBJECT(dev), "num-int-partid",
+                                 MPAM_VIRT_NUM_INTPARTID,
+                                 &error_fatal);
+        object_property_set_uint(OBJECT(dev), "cache-level", level,
+                                 &error_fatal);
+        object_property_set_uint(OBJECT(dev), "cache-type", UNIFIED_CACHE,
+                                 &error_fatal);
+        object_property_set_uint(OBJECT(dev), "cpu", i, &error_fatal);
+        sysbus_realize_and_unref(SYS_BUS_DEVICE(dev), &error_fatal);
+        sysbus_mmio_map(SYS_BUS_DEVICE(dev), 0, *base);
+        *base += MPAM_SIZE;
+    }
+}
+
 static void create_mpam_msc(VirtMachineState *vms, Error **errp)
 {
     MachineState *ms = MACHINE(vms);
@@ -2199,6 +2253,9 @@ static void create_mpam_msc(VirtMachineState *vms, Error **errp)
         sysbus_mmio_map(SYS_BUS_DEVICE(dev), 0, base);
         base += MPAM_SIZE;
     }
+
+    create_mpam_msc_cache(vms, 3, &base);
+    create_mpam_msc_cache(vms, 2, &base);
 }
 
 static void create_pcie(VirtMachineState *vms)

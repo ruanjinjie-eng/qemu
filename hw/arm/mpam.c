@@ -361,6 +361,10 @@ typedef struct MPAMMSCState {
     uint32_t ecr;
     uint64_t esr;
 
+    /* Wired interrupt outputs: [0] error, [1] overflow (level) */
+    qemu_irq err_irq;
+    qemu_irq oflow_irq;
+
     /*
      * Wired-interrupt GSIVs the board assigned (INTID = SPI + 32).  Zero
      * means "no wired interrupt"; the ACPI MPAM table reports them as-is.
@@ -429,6 +433,43 @@ static void mpam_msc_sync_esr_ecr(MPAMMSCState *s)
         s->mpamf[i].ecr = s->ecr;
         s->mpamf[i].esr = (uint32_t)s->esr;
     }
+}
+
+/*
+ * IHI 0099 8.2: the MPAM error interrupt is level-sensitive; it is active
+ * while MPAMF_ESR.ERR_CODE is non-zero and MPAMF_ECR.INTEN is set, and is
+ * deactivated by software writing ERRCODE to zero.
+ */
+static void mpam_msc_update_err_irq(MPAMMSCState *s)
+{
+    bool int_en = FIELD_EX32(s->ecr, MPAMF_ECR, INTEN);
+    bool active = FIELD_EX64(s->esr, MPAMF_ESR, ERR_CODE) != 0;
+
+    qemu_set_irq(s->err_irq, int_en && active);
+}
+
+/*
+ * IHI 0099 8.3: the overflow interrupt is signalled while any monitor has
+ * latched OFLOW_STATUS with OFLOW_INTR set; clearing OFLOW_STATUS of all
+ * overflowed monitors (W1C) deasserts it.
+ */
+static void mpam_msc_update_oflow_irq(MPAMMSCState *s)
+{
+    bool active = false;
+    int i, m;
+
+    for (i = 0; i < s->num_ris && !active; i++) {
+        for (m = 0; m < s->num_mbwu_mon; m++) {
+            MpamMbwuMon *mon = &s->mpamf[i].mbwu_mons[m];
+
+            if (mon->oflow &&
+                FIELD_EX32(mon->ctl, MSMON_CFG_MBWU_CTL, OFLOW_INTR)) {
+                active = true;
+                break;
+            }
+        }
+    }
+    qemu_set_irq(s->oflow_irq, active);
 }
 
 static Mpamf *mpam_mon_ris(MPAMMSCState *s)
@@ -506,7 +547,10 @@ static uint64_t mpam_mbwu_value(MPAMMSCState *s, Mpamf *mf, MpamMbwuMon *m)
         v += muldiv64(delta, rate_mbs, 1000);
         /* 48-bit counter wraps (MSMON_MBWU_L is 48 bits of value). */
         if (v > (1ULL << 48)) {
-            m->oflow = true;
+            if (!m->oflow) {
+                m->oflow = true;
+                mpam_msc_update_oflow_irq(s);
+            }
             v &= (1ULL << 48) - 1;
         }
     }
@@ -966,6 +1010,7 @@ static void mpam_msc_write_reg(void *opaque, hwaddr offset, uint64_t value,
         if (value & R_MSMON_CFG_MBWU_CTL_OFLOW_STATUS_MASK) {
             m->oflow = false;               /* write-one-to-clear */
         }
+        mpam_msc_update_oflow_irq(s);
         return;
     }
     case A_MSMON_MBWU:
@@ -1006,6 +1051,7 @@ static void mpam_msc_write_reg(void *opaque, hwaddr offset, uint64_t value,
         }
         s->ecr = value & MPAMF_ECR_WRITE_MASK;
         mpam_msc_sync_esr_ecr(s);
+        mpam_msc_update_err_irq(s);
         return;
     case A_MPAMF_ESR:
         /*
@@ -1014,10 +1060,12 @@ static void mpam_msc_write_reg(void *opaque, hwaddr offset, uint64_t value,
          */
         s->esr = deposit64(s->esr, 0, 32, value);
         mpam_msc_sync_esr_ecr(s);
+        mpam_msc_update_err_irq(s);
         return;
     case A_MPAMF_ESR + 0x4:
         s->esr = deposit64(s->esr, 32, 32, value);
         mpam_msc_sync_esr_ecr(s);
+        mpam_msc_update_err_irq(s);
         return;
     default:
         qemu_log_mask(LOG_UNIMP,
@@ -1096,6 +1144,9 @@ static void mpam_msc_reset(DeviceState *dev)
     MPAMMSCState *s = MPAM_MSC_DEVICE(dev);
 
     mpam_msc_state_init(s);
+    /* Deassert the wired interrupt lines */
+    mpam_msc_update_err_irq(s);
+    mpam_msc_update_oflow_irq(s);
 }
 
 static void mpam_msc_realize(DeviceState *dev, Error **errp)
@@ -1128,6 +1179,9 @@ static void mpam_msc_realize(DeviceState *dev, Error **errp)
     memory_region_init_io(&s->mr, OBJECT(s), &mpam_msc_ops, s, "mpam_msc",
                           MPAM_SIZE);
     sysbus_init_mmio(SYS_BUS_DEVICE(dev), &s->mr);
+    /* Wired interrupt outputs: index 0 = error, index 1 = overflow */
+    sysbus_init_irq(SYS_BUS_DEVICE(dev), &s->err_irq);
+    sysbus_init_irq(SYS_BUS_DEVICE(dev), &s->oflow_irq);
 }
 
 static void mpam_msc_mem_realize(DeviceState *dev, Error **errp)

@@ -2192,6 +2192,10 @@ static void create_mpam_msc_cache(VirtMachineState *vms, int level,
         object_property_set_uint(OBJECT(dev), "cache-type", UNIFIED_CACHE,
                                  &error_fatal);
         object_property_set_uint(OBJECT(dev), "cpu", i, &error_fatal);
+        /* Occupancy model: usage = capacity scaled by the CPBM fraction */
+        object_property_set_uint(OBJECT(dev), "csu-capacity-bytes",
+                                 level == 2 ? 512 * KiB : 32 * MiB,
+                                 &error_fatal);
         sysbus_realize_and_unref(SYS_BUS_DEVICE(dev), &error_fatal);
         sysbus_mmio_map(SYS_BUS_DEVICE(dev), 0, *base);
         *base += MPAM_SIZE;

@@ -2144,8 +2144,35 @@ static void create_virtio_iommu_dt_bindings(VirtMachineState *vms)
 #define MPAM_VIRT_NUM_PARTID     256
 #define MPAM_VIRT_NUM_INTPARTID  32
 
+/*
+ * MPAM MSC wired interrupts start above the platform bus SPI range
+ * (112 .. 112 + PLATFORM_BUS_NUM_IRQS - 1).  Two lines per MSC.
+ */
+#define MPAM_SPI_BASE   (112 + PLATFORM_BUS_NUM_IRQS)
+
+/*
+ * Hand a not-yet-realized MSC its two wired interrupt SPIs (error first,
+ * overflow second — the sysbus_init_irq() order in hw/arm/mpam.c), and
+ * record the GSIVs (INTID = SPI + 32) the ACPI MPAM table must report.
+ */
+static void mpam_msc_assign_irqs(DeviceState *dev,
+                                 int *err_spi, int *oflow_spi, int *next_spi)
+{
+    if (*next_spi + 1 >= NUM_IRQS) {
+        error_report("virt: out of SPIs for MPAM MSC interrupts");
+        exit(1);
+    }
+    *err_spi = (*next_spi)++;
+    *oflow_spi = (*next_spi)++;
+
+    object_property_set_int(OBJECT(dev), "err-gsiv", *err_spi + 32,
+                            &error_fatal);
+    object_property_set_int(OBJECT(dev), "oflow-gsiv", *oflow_spi + 32,
+                            &error_fatal);
+}
+
 static void create_mpam_msc_cache(VirtMachineState *vms, int level,
-                                  hwaddr *base)
+                                  hwaddr *base, int *next_spi)
 {
     MachineState *ms = MACHINE(vms);
     const CPUArchIdList *cpu_list = ms->possible_cpus;
@@ -2180,13 +2207,14 @@ static void create_mpam_msc_cache(VirtMachineState *vms, int level,
     }
 
     for (i = 0; i < cpu_list->len; i += step) {
+        int err_spi, oflow_spi;
+
         dev = qdev_new(TYPE_MPAM_MSC_CACHE);
         object_property_set_uint(OBJECT(dev), "num-ris", 1, &error_fatal);
         object_property_set_uint(OBJECT(dev), "num-partid",
                                  MPAM_VIRT_NUM_PARTID, &error_fatal);
         object_property_set_uint(OBJECT(dev), "num-int-partid",
-                                 MPAM_VIRT_NUM_INTPARTID,
-                                 &error_fatal);
+                                 MPAM_VIRT_NUM_INTPARTID, &error_fatal);
         object_property_set_uint(OBJECT(dev), "cache-level", level,
                                  &error_fatal);
         object_property_set_uint(OBJECT(dev), "cache-type", UNIFIED_CACHE,
@@ -2196,8 +2224,13 @@ static void create_mpam_msc_cache(VirtMachineState *vms, int level,
         object_property_set_uint(OBJECT(dev), "csu-capacity-bytes",
                                  level == 2 ? 512 * KiB : 32 * MiB,
                                  &error_fatal);
+        mpam_msc_assign_irqs(dev, &err_spi, &oflow_spi, next_spi);
         sysbus_realize_and_unref(SYS_BUS_DEVICE(dev), &error_fatal);
         sysbus_mmio_map(SYS_BUS_DEVICE(dev), 0, *base);
+        sysbus_connect_irq(SYS_BUS_DEVICE(dev), 0,
+                           qdev_get_gpio_in(vms->gic, err_spi));
+        sysbus_connect_irq(SYS_BUS_DEVICE(dev), 1,
+                           qdev_get_gpio_in(vms->gic, oflow_spi));
         *base += MPAM_SIZE;
     }
 }
@@ -2207,6 +2240,7 @@ static void create_mpam_msc(VirtMachineState *vms, Error **errp)
     MachineState *ms = MACHINE(vms);
     DeviceState *dev;
     int i, count = 0;
+    int next_spi = MPAM_SPI_BASE;
     hwaddr base = vms->memmap[VIRT_MPAM_MSC].base;
 
     if (ms->numa_state->num_nodes == 0) {
@@ -2218,6 +2252,8 @@ static void create_mpam_msc(VirtMachineState *vms, Error **errp)
         for (i = 0; i < ms->numa_state->num_nodes; i++) {
             /* at most 16 mem MSCs (4-bit selector space, SPI budget) */
             if (ms->numa_state->nodes[i].node_mem > 0 && count < 16) {
+                int err_spi, oflow_spi;
+
                 dev = qdev_new(TYPE_MPAM_MSC_MEM);
 
                 object_property_set_uint(OBJECT(dev), "node", i,
@@ -2230,14 +2266,21 @@ static void create_mpam_msc(VirtMachineState *vms, Error **errp)
                 object_property_set_uint(OBJECT(dev), "num-int-partid",
                                          MPAM_VIRT_NUM_INTPARTID,
                                          &error_fatal);
+                mpam_msc_assign_irqs(dev, &err_spi, &oflow_spi,
+                                     &next_spi);
                 sysbus_realize_and_unref(SYS_BUS_DEVICE(dev), &error_fatal);
                 sysbus_mmio_map(SYS_BUS_DEVICE(dev), 0, base);
+                sysbus_connect_irq(SYS_BUS_DEVICE(dev), 0,
+                                   qdev_get_gpio_in(vms->gic, err_spi));
+                sysbus_connect_irq(SYS_BUS_DEVICE(dev), 1,
+                                   qdev_get_gpio_in(vms->gic, oflow_spi));
                 base += MPAM_SIZE;
                 count++;
             }
         }
     } else {
         int count_with_mem = 0;
+        int err_spi, oflow_spi;
 
         for (i = 0; i < ms->numa_state->num_nodes; i++) {
             if (ms->numa_state->nodes[i].node_mem) {
@@ -2252,14 +2295,18 @@ static void create_mpam_msc(VirtMachineState *vms, Error **errp)
         object_property_set_uint(OBJECT(dev), "num-int-partid",
                                  2, /* extreme narrowing */
                                  &error_fatal);
-
+        mpam_msc_assign_irqs(dev, &err_spi, &oflow_spi, &next_spi);
         sysbus_realize_and_unref(SYS_BUS_DEVICE(dev), &error_fatal);
         sysbus_mmio_map(SYS_BUS_DEVICE(dev), 0, base);
+        sysbus_connect_irq(SYS_BUS_DEVICE(dev), 0,
+                           qdev_get_gpio_in(vms->gic, err_spi));
+        sysbus_connect_irq(SYS_BUS_DEVICE(dev), 1,
+                           qdev_get_gpio_in(vms->gic, oflow_spi));
         base += MPAM_SIZE;
     }
 
-    create_mpam_msc_cache(vms, 3, &base);
-    create_mpam_msc_cache(vms, 2, &base);
+    create_mpam_msc_cache(vms, 3, &base, &next_spi);
+    create_mpam_msc_cache(vms, 2, &base, &next_spi);
 }
 
 static void create_pcie(VirtMachineState *vms)

@@ -985,6 +985,102 @@ static void build_msc_cache_controller(GArray *table_data, int identifier,
     }
 }
 
+struct mpam_stat {
+    MachineState *ms;
+    GArray *table_data;
+    hwaddr base_addr;
+    int count;
+    int cpu_count;
+    uint32_t mpam_id; /* Just needs to be unique */
+};
+
+static int mpam_add_msc(Object *obj, void *opaque)
+{
+    if (object_dynamic_cast(obj, TYPE_MPAM_MSC_MEM)) {
+        struct mpam_stat *mpam_s = opaque;
+        SysBusDevice *s = SYS_BUS_DEVICE(obj);
+        int num_ris = object_property_get_uint(obj, "num-ris", &error_fatal);
+        uint32_t oflow_gsiv = object_property_get_uint(obj, "oflow-gsiv",
+                                                       &error_fatal);
+        uint32_t err_gsiv = object_property_get_uint(obj, "err-gsiv",
+                                                     &error_fatal);
+        uint64_t *ids = g_new0(uint64_t, num_ris);
+        int j = 0;
+        int i;
+
+        /*
+         * Locator for each RIS.  A per-node instance (node property set)
+         * covers exactly its own NUMA node; a single-MSC instance spans
+         * every memory-bearing node, one RIS each.
+         */
+        if (object_property_get_uint(obj, "node", &error_fatal) != UINT16_MAX) {
+            ids[j++] = object_property_get_uint(obj, "node", &error_fatal);
+        }
+        for (i = 0; i < mpam_s->ms->numa_state->num_nodes; i++) {
+            if (j >= num_ris) {
+                break;
+            }
+            if (mpam_s->ms->numa_state->nodes[i].node_mem) {
+                ids[j++] = i;
+            }
+        }
+
+        build_msc_memory_controller(mpam_s->table_data, mpam_s->count,
+                                    s->mmio[0].addr, mpam_s->mpam_id++,
+                                    num_ris, ids, oflow_gsiv, err_gsiv);
+        mpam_s->count++;
+        g_free(ids);
+    }
+
+    if (object_dynamic_cast(obj, TYPE_MPAM_MSC_CACHE)) {
+        struct mpam_stat *mpam_s = opaque;
+        SysBusDevice *s = SYS_BUS_DEVICE(obj);
+        int num_ris = 1;
+        uint64_t *ids = g_new0(uint64_t, num_ris);
+        uint8_t cache_level = object_property_get_uint(obj, "cache-level",
+                                                       &error_fatal);
+        uint8_t cache_type = object_property_get_uint(obj, "cache-type",
+                                                      &error_fatal);
+        uint16_t cpu = object_property_get_uint(obj, "cpu", &error_fatal);
+        uint32_t oflow_gsiv = object_property_get_uint(obj, "oflow-gsiv",
+                                                       &error_fatal);
+        uint32_t err_gsiv = object_property_get_uint(obj, "err-gsiv",
+                                                     &error_fatal);
+
+        ids[0] = PPTT_CACHE_ID(cache_type, cache_level, cpu);
+        build_msc_cache_controller(mpam_s->table_data, mpam_s->count,
+                                   s->mmio[0].addr, mpam_s->mpam_id++,
+                                   num_ris, ids, oflow_gsiv, err_gsiv);
+        mpam_s->count++;
+        g_free(ids);
+    }
+
+    return 0;
+}
+
+static void
+build_mpam(GArray *table_data, BIOSLinker *linker, VirtMachineState *vms)
+{
+    AcpiTable table = {
+        .sig = "MPAM",
+        .rev = 1,
+        .oem_id = vms->oem_id,
+        .oem_table_id = vms->oem_table_id,
+    };
+    struct mpam_stat mpam_s = {
+        .ms = MACHINE(vms),
+        .count = 0,
+        .base_addr = vms->memmap[VIRT_MPAM_MSC].base,
+        .table_data = table_data,
+    };
+
+    acpi_table_begin(&table, table_data);
+
+    object_child_foreach_recursive(object_get_root(), mpam_add_msc, &mpam_s);
+
+    acpi_table_end(linker, &table);
+}
+
 /*
  * ACPI spec, Revision 6.5
  * 5.2.25 Generic Timer Description Table (GTDT)
@@ -1516,6 +1612,11 @@ void virt_acpi_build(VirtMachineState *vms, AcpiBuildTables *tables)
 
     acpi_add_table(table_offsets, tables_blob);
     build_gtdt(tables_blob, tables->linker, vms, wdt && !has_wdat);
+
+    if (vms->mpam) {
+        acpi_add_table(table_offsets, tables_blob);
+        build_mpam(tables_blob, tables->linker, vms);
+    }
 
     acpi_add_table(table_offsets, tables_blob);
     {

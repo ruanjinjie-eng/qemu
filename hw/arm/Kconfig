@@ -37,6 +37,7 @@ config ARM_VIRT
     select ACPI_CXL
     select ACPI_HMAT
     select WDT_SBSA
+    select MPAM
 
 config CUBIEBOARD
     bool
@@ -649,6 +650,9 @@ config ARM_SMMUV3
     bool
     select ARM_SMMUV3_ACCEL if IOMMUFD
     imply TEGRA241_CMDQV
+
+config MPAM
+    bool
 
 config FSL_IMX6UL
     bool

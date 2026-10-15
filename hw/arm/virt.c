@@ -2133,6 +2133,14 @@ static void create_virtio_iommu_dt_bindings(VirtMachineState *vms)
     }
 }
 
+/*
+ * Partitioning geometry for board-created MSCs: 256 request PARTIDs
+ * narrowed to 32 internal PARTIDs (enables HAS_PARTID_NRW, so resctrl
+ * reports num_closids=32).
+ */
+#define MPAM_VIRT_NUM_PARTID     256
+#define MPAM_VIRT_NUM_INTPARTID  32
+
 static void create_pcie(VirtMachineState *vms)
 {
     hwaddr base_mmio = vms->memmap[VIRT_PCIE_MMIO].base;
@@ -3498,6 +3506,34 @@ static void virt_set_virtio_transports(Object *obj, Visitor *v,
     vms->virtio_transports = transports;
 }
 
+static bool virt_get_mpam(Object *obj, Error **errp)
+{
+    VirtMachineState *vms = VIRT_MACHINE(obj);
+
+    return vms->mpam;
+}
+
+static void virt_set_mpam(Object *obj, bool value, Error **errp)
+{
+    VirtMachineState *vms = VIRT_MACHINE(obj);
+
+    vms->mpam = value;
+}
+
+static bool virt_get_mpam_min_msc(Object *obj, Error **errp)
+{
+    VirtMachineState *vms = VIRT_MACHINE(obj);
+
+    return vms->mpam_min_msc;
+}
+
+static void virt_set_mpam_min_msc(Object *obj, bool value, Error **errp)
+{
+    VirtMachineState *vms = VIRT_MACHINE(obj);
+
+    vms->mpam_min_msc = value;
+}
+
 static bool virt_get_dtb_randomness(Object *obj, Error **errp)
 {
     VirtMachineState *vms = VIRT_MACHINE(obj);
@@ -4302,6 +4338,17 @@ static void virt_machine_class_init(ObjectClass *oc, const void *data)
                                           "Set on/off to enable/disable emulating a "
                                           "guest CPU which implements the ARM "
                                           "Memory Tagging Extension");
+
+    object_class_property_add_bool(oc, "mpam", virt_get_mpam, virt_set_mpam);
+    object_class_property_set_description(oc, "mpam",
+                                          "Set on/off to enable/disable "
+                                          "emulation of MPAM MSCs");
+
+    object_class_property_add_bool(oc, "mpam-min-msc", virt_get_mpam_min_msc,
+                                   virt_set_mpam_min_msc);
+    object_class_property_set_description(oc, "mpam-min-msc",
+                                          "Use RIS to reduce the number of "
+                                          "MSCs exposed");
 
     object_class_property_add_bool(oc, "its", virt_get_its,
                                    virt_set_its);

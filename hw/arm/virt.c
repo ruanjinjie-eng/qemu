@@ -2144,6 +2144,63 @@ static void create_virtio_iommu_dt_bindings(VirtMachineState *vms)
 #define MPAM_VIRT_NUM_PARTID     256
 #define MPAM_VIRT_NUM_INTPARTID  32
 
+static void create_mpam_msc(VirtMachineState *vms, Error **errp)
+{
+    MachineState *ms = MACHINE(vms);
+    DeviceState *dev;
+    int i, count = 0;
+    hwaddr base = vms->memmap[VIRT_MPAM_MSC].base;
+
+    if (ms->numa_state->num_nodes == 0) {
+        error_setg(errp,
+                   "MPAM support requires NUMA nodes to be specified");
+        return;
+    }
+    if (!vms->mpam_min_msc) {
+        for (i = 0; i < ms->numa_state->num_nodes; i++) {
+            /* at most 16 mem MSCs (4-bit selector space, SPI budget) */
+            if (ms->numa_state->nodes[i].node_mem > 0 && count < 16) {
+                dev = qdev_new(TYPE_MPAM_MSC_MEM);
+
+                object_property_set_uint(OBJECT(dev), "node", i,
+                                         &error_fatal);
+                object_property_set_uint(OBJECT(dev), "num-ris", 1,
+                                         &error_fatal);
+                object_property_set_uint(OBJECT(dev), "num-partid",
+                                         MPAM_VIRT_NUM_PARTID,
+                                         &error_fatal);
+                object_property_set_uint(OBJECT(dev), "num-int-partid",
+                                         MPAM_VIRT_NUM_INTPARTID,
+                                         &error_fatal);
+                sysbus_realize_and_unref(SYS_BUS_DEVICE(dev), &error_fatal);
+                sysbus_mmio_map(SYS_BUS_DEVICE(dev), 0, base);
+                base += MPAM_SIZE;
+                count++;
+            }
+        }
+    } else {
+        int count_with_mem = 0;
+
+        for (i = 0; i < ms->numa_state->num_nodes; i++) {
+            if (ms->numa_state->nodes[i].node_mem) {
+                count_with_mem++;
+            }
+        }
+        dev = qdev_new(TYPE_MPAM_MSC_MEM);
+        object_property_set_uint(OBJECT(dev), "num-ris", count_with_mem,
+                                 &error_fatal);
+        object_property_set_uint(OBJECT(dev), "num-partid",
+                                 MPAM_VIRT_NUM_PARTID, &error_fatal);
+        object_property_set_uint(OBJECT(dev), "num-int-partid",
+                                 2, /* extreme narrowing */
+                                 &error_fatal);
+
+        sysbus_realize_and_unref(SYS_BUS_DEVICE(dev), &error_fatal);
+        sysbus_mmio_map(SYS_BUS_DEVICE(dev), 0, base);
+        base += MPAM_SIZE;
+    }
+}
+
 static void create_pcie(VirtMachineState *vms)
 {
     hwaddr base_mmio = vms->memmap[VIRT_PCIE_MMIO].base;
@@ -3215,6 +3272,10 @@ static void machvirt_init(MachineState *machine)
 
     create_pcie(vms);
     create_cxl_host_reg_region(vms);
+
+    if (vms->mpam) {
+        create_mpam_msc(vms, &error_fatal);
+    }
 
     if (aarch64 && firmware_loaded && virt_is_acpi_enabled(vms)) {
         vms->acpi_dev = create_acpi_ged(vms);

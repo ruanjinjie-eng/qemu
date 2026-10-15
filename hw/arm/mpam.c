@@ -272,6 +272,19 @@ typedef struct MPAMMSCState {
     uint32_t num_int_partid;
     uint8_t num_ris;
 
+    /*
+     * Wired-interrupt GSIVs the board assigned (INTID = SPI + 32).  Zero
+     * means "no wired interrupt"; the ACPI MPAM table reports them as-is.
+     */
+    uint32_t err_gsiv;
+    uint32_t oflow_gsiv;
+
+    /*
+     * Memory-MSC locator: the NUMA node this instance serves.  UINT16_MAX
+     * means unset (single-MSC mode covers every memory node instead).
+     */
+    uint16_t node;
+
 } MPAMMSCState;
 
 /*
@@ -832,6 +845,9 @@ static const Property mpam_msc_props[] = {
     DEFINE_PROP_UINT8("num-ris", MPAMMSCState, num_ris, 1),
     DEFINE_PROP_UINT32("num-partid", MPAMMSCState, num_partid, 1),
     DEFINE_PROP_UINT32("num-int-partid", MPAMMSCState, num_int_partid, 0),
+    DEFINE_PROP_UINT32("err-gsiv", MPAMMSCState, err_gsiv, 0),
+    DEFINE_PROP_UINT32("oflow-gsiv", MPAMMSCState, oflow_gsiv, 0),
+    DEFINE_PROP_UINT16("node", MPAMMSCState, node, UINT16_MAX),
 };
 
 static const Property mpam_msc_cache_props[] = {

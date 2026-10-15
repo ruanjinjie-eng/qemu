@@ -52,6 +52,7 @@
 #include "hw/pci/pci_bus.h"
 #include "hw/pci-host/gpex.h"
 #include "hw/arm/virt.h"
+#include "hw/arm/mpam.h"
 #include "hw/intc/arm_gicv3_its_common.h"
 #include "hw/mem/nvdimm.h"
 #include "hw/core/platform-bus.h"
@@ -853,6 +854,135 @@ build_srat(GArray *table_data, BIOSLinker *linker, VirtMachineState *vms)
     }
 
     acpi_table_end(linker, &table);
+}
+
+/*
+ * DEN0065 3.0 Table 5: interrupt flags bit0 = mode (0 level, 1 edge),
+ * bits[2:1] = type (00b wired), bit4 = affinity valid (must be 0 for an
+ * SPI).  The MSC model signals both interrupts level, so flags are 0.
+ * GSIV 0 means the interrupt is not present.
+ */
+/*
+ * DEN0065 4.0: an MSC node is a 72-byte fixed header plus one 24-byte
+ * resource node per RIS.  MAX_NRDY_USEC 100 is the default ready-time.
+ */
+#define MPAM_MSC_NODE_HDR_LEN   72
+#define MPAM_MSC_RIS_ENTRY_LEN   24
+#define MPAM_MSC_MAX_NRDY_USEC  100
+
+static void build_msc_interrupt(GArray *table_data, uint32_t gsiv)
+{
+    build_append_int_noprefix(table_data, gsiv, 4);
+    build_append_int_noprefix(table_data, 0 /* wired, level */, 4);
+}
+
+static void build_msc_memory_controller(GArray *table_data, int identifier,
+                                        hwaddr base_addr, uint32_t mpam_id,
+                                        int num_ris, uint64_t *nodes,
+                                        uint32_t oflow_gsiv,
+                                        uint32_t err_gsiv)
+{
+    int length = MPAM_MSC_NODE_HDR_LEN + MPAM_MSC_RIS_ENTRY_LEN * num_ris;
+    int i;
+
+    build_append_int_noprefix(table_data, length, 2);
+    /* Interface Type */
+    build_append_int_noprefix(table_data, 0 /* MMIO */, 1);
+    /* Reserved */
+    build_append_int_noprefix(table_data, 0, 1);
+    build_append_int_noprefix(table_data, identifier, 4);
+    build_append_int_noprefix(table_data, base_addr, 8);
+    build_append_int_noprefix(table_data, MPAM_SIZE, 4);
+    /* Overflow interrupt */
+    build_msc_interrupt(table_data, oflow_gsiv);
+    /* Reserved */
+    build_append_int_noprefix(table_data, 0, 4);
+    /* Overflow Int Affinity */
+    build_append_int_noprefix(table_data, 0, 4);
+    /* Error interrupt */
+    build_msc_interrupt(table_data, err_gsiv);
+    /* More reserved */
+    build_append_int_noprefix(table_data, 0, 4);
+    /* Error Int Affinity */
+    build_append_int_noprefix(table_data, 0, 4);
+    /* MAX_NRDY_USEC */
+    build_append_int_noprefix(table_data, MPAM_MSC_MAX_NRDY_USEC, 4);
+    /* Linked Device - none for now */
+    build_append_int_noprefix(table_data, 0, 8);
+    /* _UID of linked device */
+    build_append_int_noprefix(table_data, 0, 4);
+    build_append_int_noprefix(table_data, num_ris, 4);
+    /* Build a memory controller resource */
+    for (i = 0; i < num_ris; i++) {
+        build_append_int_noprefix(table_data, mpam_id, 4);
+        build_append_int_noprefix(table_data, i, 1);
+        /* Reserved1 */
+        build_append_int_noprefix(table_data, 0, 2);
+        /* Locator type - 1 = Memory */
+        build_append_int_noprefix(table_data, 1, 1);
+        /* Locator part 1 Node */
+        build_append_int_noprefix(table_data, nodes[i], 8);
+        /* Locator part 2 reserved */
+        build_append_int_noprefix(table_data, 0, 4);
+        /* Num functional dependencies */
+        build_append_int_noprefix(table_data, 0, 4);
+    }
+}
+
+static void build_msc_cache_controller(GArray *table_data, int identifier,
+                                       hwaddr base_addr, uint32_t mpam_id,
+                                       int num_ris, uint64_t *cache_id,
+                                       uint32_t oflow_gsiv,
+                                       uint32_t err_gsiv)
+{
+    int length = MPAM_MSC_NODE_HDR_LEN + MPAM_MSC_RIS_ENTRY_LEN * num_ris;
+    int i;
+
+    build_append_int_noprefix(table_data, length, 2);
+    /* Interface Type */
+    build_append_int_noprefix(table_data, 0 /* MMIO */, 1);
+    /* Reserved */
+    build_append_int_noprefix(table_data, 0, 1);
+    build_append_int_noprefix(table_data, identifier, 4);
+    build_append_int_noprefix(table_data, base_addr, 8);
+    build_append_int_noprefix(table_data, MPAM_SIZE, 4);
+    /* Overflow interrupt */
+    build_msc_interrupt(table_data, oflow_gsiv);
+    /* Reserved */
+    build_append_int_noprefix(table_data, 0, 4);
+    /* Overflow Int Affinity */
+    build_append_int_noprefix(table_data, 0, 4);
+    /* Error interrupt */
+    build_msc_interrupt(table_data, err_gsiv);
+    /* More reserved */
+    build_append_int_noprefix(table_data, 0, 4);
+    /* Error Int Affinity */
+    build_append_int_noprefix(table_data, 0, 4);
+    /* MAX_NRDY_USEC */
+    build_append_int_noprefix(table_data, MPAM_MSC_MAX_NRDY_USEC, 4);
+    /* Linked Device - none for now */
+    build_append_int_noprefix(table_data, 0, 8);
+    /* _UID of linked device */
+    build_append_int_noprefix(table_data, 0, 4);
+    /* Num resource nodes */
+    build_append_int_noprefix(table_data, num_ris, 4);
+    /* Build a cache resource */
+    for (i = 0; i < num_ris; i++) {
+        /* Identifier */
+        build_append_int_noprefix(table_data, mpam_id, 4);
+        /* RIS index */
+        build_append_int_noprefix(table_data, i, 1);
+        /* Reserved1 */
+        build_append_int_noprefix(table_data, 0, 2);
+        /* Locator type - 0 = Cache */
+        build_append_int_noprefix(table_data, 0, 1);
+        /* Locator part 1 PPTT ID */
+        build_append_int_noprefix(table_data, cache_id[i], 8);
+        /* Locator part 2 reserved */
+        build_append_int_noprefix(table_data, 0, 4);
+        /* Num functional dependencies */
+        build_append_int_noprefix(table_data, 0, 4);
+    }
 }
 
 /*

@@ -645,6 +645,72 @@ DECLARE_INSTANCE_CHECKER(MPAMMSCMemState, MPAM_MSC_MEM_DEVICE,
 DECLARE_INSTANCE_CHECKER(MPAMMSCCacheState, MPAM_MSC_CACHE_DEVICE,
                          TYPE_MPAM_MSC_CACHE);
 
+void mpam_cache_fill_info(Object *obj, MpamCacheInfo *info)
+{
+    MPAMMSCCacheState *cs = MPAM_MSC_CACHE_DEVICE(obj);
+    MPAMMSCState *s = MPAM_MSC_DEVICE(obj);
+    MpamRegsList *reg_list = NULL, **r_next = &reg_list;
+    int i, p, b;
+
+    info->cpu = cs->cpu;
+    info->level = cs->cache_level;
+    info->type = cs->cache_level;
+    for (i = 0; i < s->num_ris; i++) {
+        MpamRegsList *regs;
+        MpamRegs *r;
+        MpamBmList *bm_list = NULL, **bm_next = &bm_list;
+
+        Mpamf *mpamf = &s->mpamf[i];
+
+        r = g_malloc0(sizeof(*r));
+        regs = g_malloc0(sizeof(*regs));
+        regs->value = r;
+
+        *r = (MpamRegs) {
+            .idr = mpamf->idr,
+            .iidr = mpamf->iidr,
+            .aidr = mpamf->aidr,
+            .cpor_idr = mpamf->cpor_idr,
+            .ccap_idr = mpamf->ccap_idr,
+            .mbw_idr = mpamf->mbw_idr,
+            .pri_idr = mpamf->pri_idr,
+            .partid_nrw_idr = mpamf->partid_nrw_idr,
+            .msmon_idr = mpamf->msmon_idr,
+            .csumon_idr = mpamf->csumon_idr,
+            .mbwumon_idr = mpamf->mbwumon_idr,
+            .ecr = mpamf->ecr,
+            .esr = mpamf->esr,
+            .cfg_part_sel = mpamf->cfg_part_sel, /* Garbage */
+        };
+
+        /* This is annoyingly complex */
+        for (p = 0; p < s->num_int_partid; p++) {
+            intList *w_list = NULL, **w_next = &w_list;
+            MpamBm *bm = g_malloc0(sizeof(*bm));
+            MpamBmList *bml = g_malloc0(sizeof(*bml));
+
+            bml->value = bm;
+
+            for (b = 0; b < (MPAM_CACHE_PART + 31) / 32; b++) {
+                intList *il = g_malloc0(sizeof(*il));
+
+                il->value = mpamf->per_nrw_id[p].cfg_cpbm[b];
+                *w_next = il;
+                w_next = &il->next;
+
+            }
+            *bm_next = bml;
+            bm_next = &bml->next;
+            bm->words = w_list;
+        }
+        r->cfg_cpbm = bm_list;
+        *r_next = regs;
+        r_next = &regs->next;
+    }
+    info->regs = reg_list;
+
+}
+
 static uint64_t mpam_msc_read_reg(void *opaque, hwaddr offset,
                                   unsigned size)
 {

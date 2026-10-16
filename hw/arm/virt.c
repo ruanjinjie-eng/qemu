@@ -2244,11 +2244,31 @@ static void create_mpam_msc(VirtMachineState *vms, Error **errp)
     hwaddr base = vms->memmap[VIRT_MPAM_MSC].base;
 
     if (ms->numa_state->num_nodes == 0) {
-        error_setg(errp,
-                   "MPAM support requires NUMA nodes to be specified");
-        return;
-    }
-    if (!vms->mpam_min_msc) {
+        /*
+         * No -numa: treat all RAM as one implicit node 0 -- a single
+         * memory MSC with one RIS.  The ACPI locator keeps proximity
+         * domain 0, which the arm_mpam driver resolves to node 0 via its
+         * pxm_to_node() NUMA_NO_NODE fallback; no SRAT is fabricated and
+         * the guest stays non-NUMA-aware.
+         */
+        int err_spi, oflow_spi;
+
+        dev = qdev_new(TYPE_MPAM_MSC_MEM);
+        object_property_set_uint(OBJECT(dev), "node", 0, &error_fatal);
+        object_property_set_uint(OBJECT(dev), "num-ris", 1, &error_fatal);
+        object_property_set_uint(OBJECT(dev), "num-partid",
+                                 MPAM_VIRT_NUM_PARTID, &error_fatal);
+        object_property_set_uint(OBJECT(dev), "num-int-partid",
+                                 MPAM_VIRT_NUM_INTPARTID, &error_fatal);
+        mpam_msc_assign_irqs(dev, &err_spi, &oflow_spi, &next_spi);
+        sysbus_realize_and_unref(SYS_BUS_DEVICE(dev), &error_fatal);
+        sysbus_mmio_map(SYS_BUS_DEVICE(dev), 0, base);
+        sysbus_connect_irq(SYS_BUS_DEVICE(dev), 0,
+                           qdev_get_gpio_in(vms->gic, err_spi));
+        sysbus_connect_irq(SYS_BUS_DEVICE(dev), 1,
+                           qdev_get_gpio_in(vms->gic, oflow_spi));
+        base += MPAM_SIZE;
+    } else if (!vms->mpam_min_msc) {
         for (i = 0; i < ms->numa_state->num_nodes; i++) {
             /* at most 16 mem MSCs (4-bit selector space, SPI budget) */
             if (ms->numa_state->nodes[i].node_mem > 0 && count < 16) {

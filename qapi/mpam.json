@@ -1,0 +1,120 @@
+# -*- Mode: Python -*-
+# vim: filetype=python
+# SPDX-License-Identifier: GPL-2.0-or-later
+
+##
+# = ARM MPAM State Introspection
+##
+
+##
+# @MpamBm:
+#
+# A bitmap control value, as used by MPAM cache-portion (CPBM) and
+# memory-bandwidth-portion (MBW_PBM) controls.  The value is
+# carried as an array of 32-bit words, least significant first.
+#
+# @words: The bitmap, one element per 32-bits of the control
+#
+# Since: 10.1
+##
+{ 'struct': 'MpamBm',
+  'data' : { 'words' : [ 'int' ]
+           }
+}
+
+##
+# @MpamRegs:
+#
+# Per RIS register state of an emulated MPAM Memory System Component.
+#
+# @idr: MPAMF_IDR, the MPAM features identification register
+#
+# @iidr: MPAMF_IIDR, the MPAM implementer identification register
+#
+# @aidr: MPAMF_AIDR, the MPAM architecture identification register
+#
+# @cpor-idr: MPAMF_CPOR_IDR, cache-portion feature register
+#
+# @ccap-idr: MPAMF_CCAP_IDR, cache-capacity feature register
+#
+# @mbw-idr: MPAMF_MBW_IDR, memory-bandwidth feature register
+#
+# @pri-idr: MPAMF_PRI_IDR, priority feature register
+#
+# @partid-nrw-idr: MPAMF_PARTID_NRW_IDR, PARTID narrowing register
+#
+# @msmon-idr: MPAMF_MSMON_IDR, monitor feature register
+#
+# @csumon-idr: MPAMF_CSUMON_IDR, cache-usage monitor register
+#
+# @mbwumon-idr: MPAMF_MBWUMON_IDR, memory-bandwidth monitor register
+#
+# @ecr: MPAMF_ECR, the error control register
+#
+# @esr: MPAMF_ESR, the error status register
+#
+# @cfg-part-sel: MPAMCFG_PART_SEL, the partition-selection register
+#
+# @cfg-cpbm: The configured cache-portion bitmaps, one per
+#     internal PARTID
+#
+# Since: 10.1
+##
+{ 'struct' : 'MpamRegs',
+  'data' : { 'idr' : 'int',
+             'iidr' : 'int',
+             'aidr' : 'int',
+             'cpor-idr': 'int',
+             'ccap-idr': 'int',
+             'mbw-idr': 'int',
+             'pri-idr': 'int',
+             'partid-nrw-idr': 'int',
+             'msmon-idr': 'int',
+             'csumon-idr': 'int',
+             'mbwumon-idr': 'int',
+             'ecr': 'int',
+             'esr': 'int',
+             'cfg-part-sel': 'int',
+             'cfg-cpbm': ['MpamBm']#lazy
+          }
+}
+
+##
+# @MpamCacheInfo:
+#
+# Information about an MPAM cache Memory System Component.
+#
+# @cpu: First CPU of the set associated with the cache
+#
+# @level: Level of cache
+#
+# @type: Type of cache
+#
+# @regs: The per RIS register state
+#
+# Since: 10.1
+##
+{ 'struct': 'MpamCacheInfo',
+  'data' : { 'cpu' : 'int',
+             'level' : 'int',
+             'type' : 'int',
+             'regs' : ['MpamRegs']
+           }
+}
+
+##
+# @query-mpam-cache:
+#
+# Get a list of MpamCacheInfo for all Cache related MSC
+#
+# @level: Provide a cache level to filter against
+#
+# Returns: a list of @MpamCacheInfo describing all
+#   the MPAM cache MSC instances
+#
+# Since: 10.1
+##
+{ 'command': 'query-mpam-cache',
+  'data': { '*level': 'int' },
+  'returns' : ['MpamCacheInfo'],
+  'allow-preconfig': true }

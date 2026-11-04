@@ -507,6 +507,20 @@ static uint64_t mpam_msc_read_reg(void *opaque, hwaddr offset,
             return 0;
         }
         return mpamf->mbwumon_idr;
+    case A_MPAMF_ERR_MSI_MPAM:
+        return mpamf->err_msi_mpam;
+    case A_MPAMF_ERR_MSI_ADDR_L:
+        return mpamf->err_msi_addr_l;
+    case A_MPAMF_ERR_MSI_ADDR_H:
+        return mpamf->err_msi_addr_h;
+    case A_MPAMF_ERR_MSI_DATA:
+        return mpamf->err_msi_data;
+    case A_MPAMF_ERR_MSI_ATTR:
+        return mpamf->err_msi_attr;
+    case A_MPAMF_ECR:
+        return mpamf->ecr;
+    case A_MPAMF_ESR:
+        return mpamf->esr;
     case A_MPAMCFG_PART_SEL:
         return mpamf->cfg_part_sel;
     case A_MPAMF_MPAMCFG_CMAX:
@@ -799,6 +813,14 @@ static void mpam_msc_write_reg(void *opaque, hwaddr offset, uint64_t value,
         }
         return;
     }
+    case A_MPAMF_ECR:
+        if (value & ~MPAMF_ECR_WRITE_MASK) {
+            qemu_log_mask(LOG_UNIMP,
+                          "MPAM: Unexpected write to ECR Mask=%x Value=%lx\n",
+                          MPAMF_ECR_WRITE_MASK, value);
+        }
+        mpamf->ecr = value;
+        return;
     default:
         qemu_log_mask(LOG_UNIMP,
                       "MPAM: Write to unexpected register Addr %lx Value=%lx\n",
@@ -829,10 +851,14 @@ static void mpam_msc_state_init(MPAMMSCState *s)
     s->ris = 0;
     s->part_sel = 0;
     s->internal_part_sel = false;
+    s->ecr = 0;
+    s->esr = 0;
 
     for (int i = 0; i < s->num_ris; i++) {
         Mpamf *mpamf = &s->mpamf[i];
 
+        mpamf->ecr = 0;
+        mpamf->esr = 0;
         memset(mpamf->per_nrw_id, 0,
                sizeof(MpamfPerNrwId) * s->num_int_partid);
         memset(mpamf->cfg_intpartid, 0,

@@ -6552,6 +6552,67 @@ static void mpam2_el2_write(CPUARMState *env, const ARMCPRegInfo *ri,
     raw_write(env, ri, value & MPAM2_EL2_VALID_MASK);
 }
 
+#define MPAM0_EL1_VALID_MASK \
+    (R_MPAM0_EL1_PARTID_D_MASK | R_MPAM0_EL1_PMG_D_MASK)
+
+#define MPAM1_EL1_VALID_MASK \
+    (R_MPAM1_EL1_MPAMEN_MASK | R_MPAM1_EL1_PARTID_D_MASK | \
+     R_MPAM1_EL1_PMG_D_MASK | R_MPAM1_EL1_PARTID_I_MASK | \
+     R_MPAM1_EL1_PMG_I_MASK)
+
+static void mpam0_el1_write(CPUARMState *env, const ARMCPRegInfo *ri,
+                            uint64_t value)
+{
+    raw_write(env, ri, value & MPAM0_EL1_VALID_MASK);
+}
+
+/*
+ * D24.12.2: when EL2 is implemented and EL3 is not, MPAM1_EL1 bit [63] is
+ * architecturally mapped to MPAM2_EL2[63] and is read-only, reading
+ * MPAM2_EL2.MPAMEN. MPAM2_EL2.MPAMEN is the writable MPAM enable control
+ * in that case (D21.1.6).
+ */
+static uint64_t mpam1_el1_read(CPUARMState *env, const ARMCPRegInfo *ri)
+{
+    uint64_t value = env->mpam1_el1;
+
+    if (arm_feature(env, ARM_FEATURE_EL2)) {
+        value = deposit64(value, 63, 1,
+                          extract64(env->mpam2_el2, 63, 1));
+    }
+    return value;
+}
+
+static void mpam1_el1_write(CPUARMState *env, const ARMCPRegInfo *ri,
+                            uint64_t value)
+{
+    if (arm_feature(env, ARM_FEATURE_EL2)) {
+        value = deposit64(value, 63, 1,
+                          extract64(env->mpam2_el2, 63, 1));
+    }
+    raw_write(env, ri, value & MPAM1_EL1_VALID_MASK);
+}
+
+static CPAccessResult access_mpam1(CPUARMState *env,
+                                   const ARMCPRegInfo *ri, bool isread)
+{
+    if (arm_current_el(env) < 2 && arm_is_el2_enabled(env) &&
+        (env->mpam2_el2 & R_MPAM2_EL2_TRAPMPAM1EL1_MASK)) {
+        return CP_ACCESS_TRAP_EL2;
+    }
+    return CP_ACCESS_OK;
+}
+
+static CPAccessResult access_mpam0(CPUARMState *env,
+                                   const ARMCPRegInfo *ri, bool isread)
+{
+    if (arm_current_el(env) < 2 && arm_is_el2_enabled(env) &&
+        (env->mpam2_el2 & R_MPAM2_EL2_TRAPMPAM0EL1_MASK)) {
+        return CP_ACCESS_TRAP_EL2;
+    }
+    return CP_ACCESS_OK;
+}
+
 void register_cp_regs_for_features(ARMCPU *cpu)
 {
     /* Register all the coprocessor registers based on feature bits */
@@ -6931,6 +6992,23 @@ void register_cp_regs_for_features(ARMCPU *cpu)
               .fieldoffset = offsetof(CPUARMState, mpam2_el2),
               .resetvalue = R_MPAM2_EL2_MPAMEN_MASK,
               .writefn = mpam2_el2_write, .raw_writefn = raw_write },
+            { .name = "MPAMIDR_EL1", .state = ARM_CP_STATE_AA64,
+              .opc0 = 3, .opc1 = 0, .crn = 0xa, .crm = 4, .opc2 = 4,
+              .access = PL1_R, .type = ARM_CP_CONST,
+              .resetvalue = cpu->isar.mpamidr_el1 },
+            { .name = "MPAM0_EL1", .state = ARM_CP_STATE_AA64,
+              .opc0 = 3, .opc1 = 0, .crn = 0xa, .crm = 5, .opc2 = 1,
+              .access = PL1_RW, .accessfn = access_mpam0,
+              .fieldoffset = offsetof(CPUARMState, mpam0_el1),
+              .resetvalue = 0,
+              .writefn = mpam0_el1_write, .raw_writefn = raw_write },
+            { .name = "MPAM1_EL1", .state = ARM_CP_STATE_AA64,
+              .opc0 = 3, .opc1 = 0, .crn = 0xa, .crm = 5, .opc2 = 0,
+              .access = PL1_RW, .accessfn = access_mpam1,
+              .fieldoffset = offsetof(CPUARMState, mpam1_el1),
+              .resetvalue = R_MPAM1_EL1_MPAMEN_MASK,
+              .readfn = mpam1_el1_read,
+              .writefn = mpam1_el1_write, .raw_writefn = raw_write },
             { .name = "MVFR1_EL1", .state = ARM_CP_STATE_AA64,
               .opc0 = 3, .opc1 = 0, .crn = 0, .crm = 3, .opc2 = 1,
               .access = PL1_R, .type = ARM_CP_CONST,

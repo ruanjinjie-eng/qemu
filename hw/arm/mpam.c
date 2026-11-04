@@ -13,6 +13,7 @@
 #include "hw/core/registerfields.h"
 #include "hw/core/sysbus.h"
 #include "qom/object.h"
+#include "migration/vmstate.h"
 #include "hw/arm/mpam.h"
 
 /*
@@ -227,3 +228,280 @@ REG32(MPAMF_MPAMCFG_MBW_PBM0, 0x2000)
 #define MPAM_CACHE_PART 32
 /* Implementer 0 is reserved for software; product ID 'Q'. */
 #define MPAM_IIDR_IMPLEMENTER 0
+
+typedef struct Mpamf {
+    uint64_t idr;
+    uint32_t iidr;
+    uint32_t aidr;
+    uint32_t impl_idr;
+    uint32_t cpor_idr;
+    uint32_t ccap_idr;
+    uint32_t mbw_idr;
+    uint32_t pri_idr;
+    uint32_t partid_nrw_idr;
+    uint32_t msmon_idr;
+    uint32_t csumon_idr;
+    uint32_t mbwumon_idr;
+    uint32_t err_msi_mpam;
+    uint32_t err_msi_addr_l;
+    uint32_t err_msi_addr_h;
+    uint32_t err_msi_data;
+    uint32_t err_msi_attr;
+    uint32_t ecr;
+    uint32_t esr;
+    uint32_t cfg_part_sel;
+    /* Array sizes for migration (derived from the MSC properties). */
+    uint32_t num_partid_vm;
+    uint32_t num_int_partid_vm;
+    uint32_t num_mbwu_mon_vm;
+    uint32_t num_csu_mon_vm;
+} Mpamf;
+
+typedef struct MPAMMSCState {
+    SysBusDevice parent_obj;
+
+    Mpamf *mpamf;
+
+    uint8_t ris;
+    uint16_t part_sel; /* Technically per ris, but in same reg */
+    bool internal_part_sel;
+    struct MemoryRegion mr;
+    uint32_t num_partid;
+    uint32_t num_int_partid;
+    uint8_t num_ris;
+    /* Array size for migration (derived from num_ris). */
+    uint32_t num_ris_vm;
+
+} MPAMMSCState;
+
+DECLARE_INSTANCE_CHECKER(MPAMMSCState, MPAM_MSC_DEVICE, TYPE_MPAM_MSC);
+
+static bool mpam_has_csu_mon(Mpamf *mf)
+{
+    return FIELD_EX32(mf->idr, MPAMF_IDR, HAS_MSMON) &&
+           FIELD_EX32(mf->msmon_idr, MPAMF_MSMON_IDR, MSMON_CSU);
+}
+
+static bool mpam_has_mbwu_mon(Mpamf *mf)
+{
+    return FIELD_EX32(mf->idr, MPAMF_IDR, HAS_MSMON) &&
+           FIELD_EX32(mf->msmon_idr, MPAMF_MSMON_IDR, MSMON_MBWU);
+}
+
+static const VMStateDescription vmstate_mpamf = {
+    .name = "mpam/mpamf",
+    .version_id = 1,
+    .minimum_version_id = 1,
+    .fields = (const VMStateField[]) {
+        VMSTATE_UINT64(idr, Mpamf),
+        VMSTATE_UINT32(iidr, Mpamf),
+        VMSTATE_UINT32(aidr, Mpamf),
+        VMSTATE_UINT32(impl_idr, Mpamf),
+        VMSTATE_UINT32(cpor_idr, Mpamf),
+        VMSTATE_UINT32(ccap_idr, Mpamf),
+        VMSTATE_UINT32(mbw_idr, Mpamf),
+        VMSTATE_UINT32(pri_idr, Mpamf),
+        VMSTATE_UINT32(partid_nrw_idr, Mpamf),
+        VMSTATE_UINT32(msmon_idr, Mpamf),
+        VMSTATE_UINT32(csumon_idr, Mpamf),
+        VMSTATE_UINT32(mbwumon_idr, Mpamf),
+        VMSTATE_UINT32(err_msi_mpam, Mpamf),
+        VMSTATE_UINT32(err_msi_addr_l, Mpamf),
+        VMSTATE_UINT32(err_msi_addr_h, Mpamf),
+        VMSTATE_UINT32(err_msi_data, Mpamf),
+        VMSTATE_UINT32(err_msi_attr, Mpamf),
+        VMSTATE_UINT32(ecr, Mpamf),
+        VMSTATE_UINT32(esr, Mpamf),
+        VMSTATE_UINT32(cfg_part_sel, Mpamf),
+        VMSTATE_END_OF_LIST()
+    },
+};
+
+static const VMStateDescription vmstate_mpam_msc = {
+    .name = "mpam/msc",
+    .version_id = 1,
+    .minimum_version_id = 1,
+    .fields = (const VMStateField[]) {
+        VMSTATE_UINT8(ris, MPAMMSCState),
+        VMSTATE_UINT16(part_sel, MPAMMSCState),
+        VMSTATE_BOOL(internal_part_sel, MPAMMSCState),
+        VMSTATE_STRUCT_VARRAY_POINTER_UINT32(mpamf, MPAMMSCState,
+                                             num_ris_vm,
+                                             vmstate_mpamf, Mpamf),
+        VMSTATE_END_OF_LIST()
+    },
+};
+
+static uint64_t mpam_msc_read_reg(void *opaque, hwaddr offset,
+                                  unsigned size)
+{
+    MPAMMSCState *s = MPAM_MSC_DEVICE(opaque);
+    Mpamf *mpamf = &s->mpamf[s->ris];
+
+    switch (offset) {
+    case A_MPAMF_IDR:
+        switch (size) {
+        case 4:
+            return mpamf->idr & MAKE_64BIT_MASK(0, 32);
+        case 8:
+            return mpamf->idr;
+        default:
+            qemu_log_mask(LOG_UNIMP, "MPAM: Unexpected read size\n");
+            return 0;
+        }
+    case A_MPAMF_IDR + 0x04:
+        if (!FIELD_EX32(mpamf->idr, MPAMF_IDR, EXT)) {
+            qemu_log_mask(LOG_UNIMP, "MPAM: Unexpected read of top of IDR\n");
+            return 0;
+        }
+        switch (size) {
+        case 4:
+            return mpamf->idr >> 32;
+        default:
+            qemu_log_mask(LOG_UNIMP, "MPAM: Unexpected read size\n");
+            return 0;
+        }
+    case A_MPAMF_IIDR:
+        return mpamf->iidr;
+    case A_MPAMF_AIDR:
+        return mpamf->aidr;
+    case A_MPAMF_IMPL_IDR:
+        if (!FIELD_EX32(mpamf->idr, MPAMF_IDR, HAS_IMPL_IDR)) {
+            qemu_log_mask(LOG_UNIMP,
+                "MPAM: Accessing IMPL_IDR which isn't supported\n");
+            return 0;
+        }
+        return mpamf->impl_idr;
+    case A_MPAMF_PARTID_NRW_IDR: {
+        return mpamf->partid_nrw_idr;
+    }
+    case A_MPAMF_MSMON_IDR:
+        if (!FIELD_EX32(mpamf->idr, MPAMF_IDR, HAS_MSMON)) {
+            return 0;
+        }
+        return mpamf->msmon_idr;
+    case A_MPAMF_CSUMON_IDR:
+        if (!mpam_has_csu_mon(mpamf)) {
+            qemu_log_mask(LOG_UNIMP,
+                "MPAM: Unexpected read of CSUMON_IDR with no CSU monitor\n");
+            return 0;
+        }
+        return mpamf->csumon_idr;
+    case A_MPAMF_MBWUMON_IDR:
+        if (!mpam_has_mbwu_mon(mpamf)) {
+            qemu_log_mask(LOG_UNIMP,
+                "MPAM: Unexpected read of MBWUMON_IDR with no MBWU monitor\n");
+            return 0;
+        }
+        return mpamf->mbwumon_idr;
+    default:
+        qemu_log_mask(LOG_UNIMP,
+                      "MPAM: Unexpected read of %lx\n", offset);
+        return 0x0;
+    }
+}
+
+static void mpam_msc_write_reg(void *opaque, hwaddr offset, uint64_t value,
+                               unsigned size)
+{
+    switch (offset) {
+    default:
+        qemu_log_mask(LOG_UNIMP,
+                      "MPAM: Write to unexpected register Addr %lx Value=%lx\n",
+                      offset, value);
+    }
+}
+
+static const MemoryRegionOps mpam_msc_ops = {
+    .read = mpam_msc_read_reg,
+    .write = mpam_msc_write_reg,
+    .endianness = DEVICE_LITTLE_ENDIAN,
+    .valid = {
+        .min_access_size = 4,
+        .max_access_size = 8,
+        .unaligned = false,
+    },
+    .impl = {
+        .min_access_size = 4,
+        .max_access_size = 8,
+    },
+};
+
+/*
+ * Power-on state of the MSC, shared between realize and reset.
+ */
+static void mpam_msc_state_init(MPAMMSCState *s)
+{
+    s->ris = 0;
+    s->part_sel = 0;
+    s->internal_part_sel = false;
+}
+
+static void mpam_msc_reset(DeviceState *dev)
+{
+    MPAMMSCState *s = MPAM_MSC_DEVICE(dev);
+
+    mpam_msc_state_init(s);
+}
+
+static bool mpam_msc_realize(DeviceState *dev, Error **errp)
+{
+    MPAMMSCState *s = MPAM_MSC_DEVICE(dev);
+
+    /* IHI 0099: MPAMCFG_PART_SEL.RIS is 4 bits, so at most 16 RIS. */
+    if (s->num_ris < 1 || s->num_ris > 16) {
+        error_setg(errp, "num-ris must be in the range 1..16");
+        return false;
+    }
+    /* PARTID_MAX is a 16-bit field. */
+    if (s->num_partid < 1 || s->num_partid > 65536) {
+        error_setg(errp, "num-partid must be in the range 1..65536");
+        return false;
+    }
+    if (s->num_int_partid == 0) {
+        s->num_int_partid = s->num_partid;
+    }
+    if (s->num_int_partid > 65536) {
+        error_setg(errp, "num-int-partid must be <= 65536");
+        return false;
+    }
+
+    s->num_ris_vm = s->num_ris;
+    s->mpamf = g_new0(Mpamf, s->num_ris);
+    mpam_msc_state_init(s);
+
+    memory_region_init_io(&s->mr, OBJECT(s), &mpam_msc_ops, s, "mpam_msc",
+                          MPAM_SIZE);
+    sysbus_init_mmio(SYS_BUS_DEVICE(dev), &s->mr);
+    return true;
+}
+
+static const Property mpam_msc_props[] = {
+    DEFINE_PROP_UINT8("num-ris", MPAMMSCState, num_ris, 1),
+    DEFINE_PROP_UINT32("num-partid", MPAMMSCState, num_partid, 1),
+    DEFINE_PROP_UINT32("num-int-partid", MPAMMSCState, num_int_partid, 0),
+};
+
+static void mpam_msc_init(ObjectClass *klass, const void *data)
+{
+    DeviceClass *dc = DEVICE_CLASS(klass);
+
+    device_class_set_props(dc, mpam_msc_props);
+    dc->vmsd = &vmstate_mpam_msc;
+    /* Board-internal sysbus devices; not creatable from the command line. */
+    dc->user_creatable = false;
+    device_class_set_legacy_reset(dc, mpam_msc_reset);
+}
+
+static const TypeInfo mpam_msc_info = {
+    .name = TYPE_MPAM_MSC,
+    .parent = TYPE_SYS_BUS_DEVICE,
+    .instance_size = sizeof(MPAMMSCState),
+    .class_init = mpam_msc_init
+};
+
+static void mpam_register_types(void)
+{
+    type_register_static(&mpam_msc_info);
+}
+type_init(mpam_register_types);

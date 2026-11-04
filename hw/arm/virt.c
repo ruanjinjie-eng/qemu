@@ -2222,6 +2222,19 @@ static void create_mpam_msc_cache(VirtMachineState *vms, int level,
         DeviceState *dev;
         int err_spi, oflow_spi;
 
+        CPUCoreCaches caches[CPU_MAX_CACHES];
+        unsigned int num_caches, c;
+        uint32_t csu_capacity = 0;
+
+        num_caches = virt_get_caches(vms, caches);
+        for (c = 0; c < num_caches; c++) {
+            if (caches[c].level == level &&
+                caches[c].type == UNIFIED_CACHE) {
+                csu_capacity = caches[c].size;
+                break;
+            }
+        }
+
         dev = qdev_new(TYPE_MPAM_MSC_CACHE);
         object_property_set_uint(OBJECT(dev), "num-ris", 1, &error_fatal);
         object_property_set_uint(OBJECT(dev), "num-partid",
@@ -2234,6 +2247,9 @@ static void create_mpam_msc_cache(VirtMachineState *vms, int level,
                                  &error_fatal);
         object_property_set_uint(OBJECT(dev), "cpu", i, &error_fatal);
         mpam_msc_assign_irqs(dev, &err_spi, &oflow_spi, next_spi);
+        /* Occupancy model: usage = capacity scaled by the CPBM fraction */
+        object_property_set_uint(OBJECT(dev), "csu-capacity-bytes",
+                                 csu_capacity, &error_fatal);
         sysbus_realize_and_unref(SYS_BUS_DEVICE(dev), &error_fatal);
         mpam_msc_mmio_map(vms, dev, *base);
         sysbus_connect_irq(SYS_BUS_DEVICE(dev), 0,

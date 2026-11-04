@@ -11,6 +11,7 @@
 #include "qemu/timer.h"
 #include "qemu/host-utils.h"
 #include "qemu/bitops.h"
+#include "qemu/units.h"
 #include "hw/core/irq.h"
 #include "hw/core/qdev-properties.h"
 #include "hw/core/registerfields.h"
@@ -146,8 +147,20 @@ REG32(MSMON_MBWU_L, 0x0880)         /* 64-bit counter */
 REG32(MSMON_MBWU_CAPTURE, 0x0868)
 REG32(MSMON_MBWU_CAPTURE_L, 0x0890)
 REG32(MSMON_CAPT_EVNT, 0x0808)
+
 REG32(MSMON_CFG_CSU_FLT, 0x0810)
+    FIELD(MSMON_CFG_CSU_FLT, PARTID, 0, 16)
+    FIELD(MSMON_CFG_CSU_FLT, PMG, 16, 8)
+    FIELD(MSMON_CFG_CSU_FLT, XCL, 31, 1)
+
 REG32(MSMON_CFG_CSU_CTL, 0x0818)
+    FIELD(MSMON_CFG_CSU_CTL, TYPE, 0, 8)
+    FIELD(MSMON_CFG_CSU_CTL, MATCH_PARTID, 16, 1)
+    FIELD(MSMON_CFG_CSU_CTL, MATCH_PMG, 17, 1)
+    FIELD(MSMON_CFG_CSU_CTL, EN, 31, 1)
+
+REG32(MSMON_CSU, 0x0840)             /* 31-bit value, bit31 NRDY */
+REG32(MSMON_CSU_CAPTURE, 0x0848)
 
 REG32(MPAMF_ERR_MSI_MPAM, 0x00dc)
 REG32(MPAMF_ERR_MSI_ADDR_L, 0x00e0)
@@ -289,6 +302,16 @@ typedef struct MpamMbwuMon {
     bool oflow;
 } MpamMbwuMon;
 
+/*
+ * One CSU monitor instance.  Occupancy is modelled as a snapshot: the
+ * cache capacity scaled by the CPBM portion fraction of the filtered
+ * PARTID, so cache-usage readings track the configured CBM.
+ */
+typedef struct MpamCsuMon {
+    uint32_t flt;
+    uint32_t ctl;
+} MpamCsuMon;
+
 typedef struct Mpamf {
     uint64_t idr;
     uint32_t iidr;
@@ -315,6 +338,8 @@ typedef struct Mpamf {
     MpamfPerNrwId *per_nrw_id;
 
     MpamMbwuMon *mbwu_mons;
+    MpamCsuMon *csu_mons;
+
     /* Array sizes for migration (derived from the MSC properties). */
     uint32_t num_partid_vm;
     uint32_t num_int_partid_vm;
@@ -337,6 +362,8 @@ typedef struct MPAMMSCState {
     uint8_t num_ris;
     uint32_t num_mbwu_mon;
     uint64_t bw_nominal_bps;
+    uint32_t num_csu_mon;
+    uint64_t csu_capacity;
 
     /*
      * Wired-interrupt GSIVs the board assigned (INTID = SPI + 32).  Zero
@@ -480,6 +507,36 @@ static uint64_t mpam_mbwu_value(MPAMMSCState *s, Mpamf *mf, MpamMbwuMon *m)
     return v;
 }
 
+static MpamCsuMon *mpam_csu_mon(MPAMMSCState *s, Mpamf *mf)
+{
+    unsigned mon = FIELD_EX32(s->mon_sel, MSMON_CFG_MON_SEL, MON_SEL);
+
+    if (mon >= s->num_csu_mon) {
+        qemu_log_mask(LOG_GUEST_ERROR,
+                      "MPAM: MON_SEL %d out of range (num-csu-mon %d)\n",
+                      mon, s->num_csu_mon);
+        mon = 0;
+    }
+    return &mf->csu_mons[mon];
+}
+
+/*
+ * Snapshot occupancy: the cache capacity scaled by the fraction of CPBM
+ * portions the filtered PARTID is allowed to occupy.
+ */
+static uint32_t mpam_csu_value(MPAMMSCState *s, Mpamf *mf, MpamCsuMon *m)
+{
+    if (FIELD_EX32(m->ctl, MSMON_CFG_CSU_CTL, EN) &&
+        FIELD_EX32(m->ctl, MSMON_CFG_CSU_CTL, MATCH_PARTID)) {
+        uint32_t partid = FIELD_EX32(m->flt, MSMON_CFG_CSU_FLT, PARTID);
+        uint32_t nrw = mpam_nrw_id_for(s, mf, partid);
+        uint32_t cpbm = mf->per_nrw_id[nrw].cfg_cpbm[0];
+
+        return muldiv64(s->csu_capacity, ctpop32(cpbm), MPAM_CACHE_PART);
+    }
+    return 0;
+}
+
 typedef struct MPAMMSCMemState {
     MPAMMSCState parent;
 } MPAMMSCMemState;
@@ -529,6 +586,17 @@ static const VMStateDescription vmstate_mpam_mbwu_mon = {
         VMSTATE_UINT64(base, MpamMbwuMon),
         VMSTATE_INT64(t0, MpamMbwuMon),
         VMSTATE_BOOL(oflow, MpamMbwuMon),
+        VMSTATE_END_OF_LIST()
+    },
+};
+
+static const VMStateDescription vmstate_mpam_csu_mon = {
+    .name = "mpam/csu-mon",
+    .version_id = 1,
+    .minimum_version_id = 1,
+    .fields = (const VMStateField[]) {
+        VMSTATE_UINT32(flt, MpamCsuMon),
+        VMSTATE_UINT32(ctl, MpamCsuMon),
         VMSTATE_END_OF_LIST()
     },
 };
@@ -588,6 +656,10 @@ static const VMStateDescription vmstate_mpamf = {
                                              num_mbwu_mon_vm,
                                              vmstate_mpam_mbwu_mon,
                                              MpamMbwuMon),
+        VMSTATE_STRUCT_VARRAY_POINTER_UINT32(csu_mons, Mpamf,
+                                             num_csu_mon_vm,
+                                             vmstate_mpam_csu_mon,
+                                             MpamCsuMon),
         VMSTATE_END_OF_LIST()
     },
 };
@@ -704,6 +776,34 @@ static uint64_t mpam_msc_read_reg(void *opaque, hwaddr offset,
             return 0;
         }
         return s->mon_sel;
+    case A_MSMON_CFG_CSU_FLT:
+        if (!mpam_has_csu_mon(mpamf)) {
+            qemu_log_mask(LOG_UNIMP,
+                "MPAM: Unexpected read of CSU_FLT with no CSU monitor\n");
+            return 0;
+        }
+        return mpam_csu_mon(s, mpam_mon_ris(s))->flt;
+    case A_MSMON_CFG_CSU_CTL:
+        if (!mpam_has_csu_mon(mpamf)) {
+            qemu_log_mask(LOG_UNIMP,
+                "MPAM: Unexpected read of CSU_CTL with no CSU monitor\n");
+            return 0;
+        }
+        return mpam_csu_mon(s, mpam_mon_ris(s))->ctl;
+    case A_MSMON_CSU ... (A_MSMON_CSU + 3):
+    case A_MSMON_CSU_CAPTURE ... (A_MSMON_CSU_CAPTURE + 3):
+    {
+        if (!mpam_has_csu_mon(mpamf)) {
+            return 0;
+        }
+        uint32_t v = mpam_csu_value(s, mpam_mon_ris(s),
+                                    mpam_csu_mon(s, mpam_mon_ris(s)));
+        hwaddr off = (offset >= A_MSMON_CSU_CAPTURE) ?
+                     offset - A_MSMON_CSU_CAPTURE : offset - A_MSMON_CSU;
+
+        /* NRDY (bit 31) is never set: the snapshot is always ready */
+        return extract32(v, off * 8, 32 - off * 8);
+    }
     case A_MSMON_CFG_MBWU_FLT:
         if (!mpam_has_mbwu_mon(mpamf)) {
             qemu_log_mask(LOG_UNIMP,
@@ -1236,11 +1336,38 @@ static void mpam_msc_write_reg(void *opaque, hwaddr offset, uint64_t value,
         m->t0 = qemu_clock_get_ns(QEMU_CLOCK_VIRTUAL);
         return;
     }
-    case A_MSMON_CAPT_EVNT:
     case A_MSMON_CFG_CSU_FLT:
+        mpam_csu_mon(s, mpam_mon_ris(s))->flt =
+            value & (R_MSMON_CFG_CSU_FLT_PARTID_MASK |
+                     R_MSMON_CFG_CSU_FLT_PMG_MASK |
+                     R_MSMON_CFG_CSU_FLT_XCL_MASK);
+        return;
     case A_MSMON_CFG_CSU_CTL:
+        if (!mpam_has_csu_mon(mpamf)) {
+            qemu_log_mask(LOG_UNIMP,
+                          "MPAM: Unexpected write to CSU_CTL with no CSU monitor\n");
+            return;
+        }
+        mpam_csu_mon(s, mpam_mon_ris(s))->ctl =
+            value & (R_MSMON_CFG_CSU_CTL_TYPE_MASK |
+                     R_MSMON_CFG_CSU_CTL_MATCH_PARTID_MASK |
+                     R_MSMON_CFG_CSU_CTL_MATCH_PMG_MASK |
+                     R_MSMON_CFG_CSU_CTL_EN_MASK);
+        return;
+    case A_MSMON_CSU:
+    case A_MSMON_CSU_CAPTURE:
+        /*
+         * These are probed with MSMON___NRDY to determine whether the
+         * counter needs polling.  Ignoring the write leaves the snapshot
+         * permanently ready, which is what the emulation models.
+         */
+        return;
+    case A_MSMON_CAPT_EVNT:
+        if (!mpam_has_csu_mon(mpamf) && !mpam_has_mbwu_mon(mpamf)) {
+            return;
+        }
         qemu_log_mask(LOG_UNIMP,
-                      "MPAM: cache-usage monitoring not implemented (write %lx)\n",
+                      "MPAM: capture events not implemented (write %lx)\n",
                       offset);
         return;
     case A_MPAMF_ECR:
@@ -1296,6 +1423,7 @@ static void mpam_msc_state_init(MPAMMSCState *s)
                sizeof(uint32_t) * s->num_partid);
         memset(mpamf->mbwu_mons, 0,
                sizeof(MpamMbwuMon) * s->num_mbwu_mon);
+        memset(mpamf->csu_mons, 0, sizeof(MpamCsuMon) * s->num_csu_mon);
         /*
          * t0 is a virtual-clock timestamp; zero is a valid value (the
          * clock starts at zero), so initialise it explicitly rather than
@@ -1359,6 +1487,10 @@ static bool mpam_msc_realize(DeviceState *dev, Error **errp)
         error_setg(errp, "num-mbwu-mon must be in the range 1..65536");
         return false;
     }
+    if (s->num_csu_mon > 65536) {
+        error_setg(errp, "num-csu-mon must be <= 65536");
+        return false;
+    }
     s->num_ris_vm = s->num_ris;
     s->mpamf = g_new0(Mpamf, s->num_ris);
     for (int i = 0; i < s->num_ris; i++) {
@@ -1368,6 +1500,8 @@ static bool mpam_msc_realize(DeviceState *dev, Error **errp)
         s->mpamf[i].cfg_intpartid = g_new0(uint32_t, s->num_partid);
         s->mpamf[i].num_mbwu_mon_vm = s->num_mbwu_mon;
         s->mpamf[i].mbwu_mons = g_new0(MpamMbwuMon, s->num_mbwu_mon);
+        s->mpamf[i].num_csu_mon_vm = s->num_csu_mon;
+        s->mpamf[i].csu_mons = g_new0(MpamCsuMon, s->num_csu_mon);
     }
 
     mpam_msc_state_init(s);
@@ -1502,6 +1636,14 @@ static void mpam_msc_cache_realize(DeviceState *dev, Error **errp)
         mpamf->mbwumon_idr = FIELD_DP32(mpamf->mbwumon_idr,
                                         MPAMF_MBWUMON_IDR, HAS_RWBW, 1);
 
+        if (s->num_csu_mon) {
+            mpamf->msmon_idr = FIELD_DP32(mpamf->msmon_idr,
+                                          MPAMF_MSMON_IDR, MSMON_CSU, 1);
+            mpamf->csumon_idr = FIELD_DP32(mpamf->csumon_idr,
+                                           MPAMF_CSUMON_IDR, NUM_MON,
+                                           s->num_csu_mon);
+        }
+
         /* Cache specific bit */
         mpamf->idr = FIELD_DP64(mpamf->idr, MPAMF_IDR, HAS_CPOR_PART, 1);
         mpamf->idr = FIELD_DP64(mpamf->idr, MPAMF_IDR, HAS_CCAP_PART, 1);
@@ -1561,6 +1703,9 @@ static const Property mpam_msc_props[] = {
     DEFINE_PROP_UINT32("num-mbwu-mon", MPAMMSCState, num_mbwu_mon, 8),
     DEFINE_PROP_UINT64("bw-nominal-bps", MPAMMSCState, bw_nominal_bps,
                        10000000000ULL),  /* 10 GB/s default bandwidth */
+    DEFINE_PROP_UINT32("num-csu-mon", MPAMMSCState, num_csu_mon, 4),
+    DEFINE_PROP_UINT64("csu-capacity-bytes", MPAMMSCState, csu_capacity,
+                       32 * MiB),
     DEFINE_PROP_UINT32("err-gsiv", MPAMMSCState, err_gsiv, 0),
     DEFINE_PROP_UINT32("oflow-gsiv", MPAMMSCState, oflow_gsiv, 0),
     DEFINE_PROP_UINT16("node", MPAMMSCState, node, UINT16_MAX),

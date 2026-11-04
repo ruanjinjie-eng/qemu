@@ -757,6 +757,8 @@ typedef struct CPUArchState {
     struct CPUBreakpoint *cpu_breakpoint[16];
     struct CPUWatchpoint *cpu_watchpoint[16];
 
+    uint64_t mpam0_el1;
+    uint64_t mpam1_el1;
     uint64_t mpam2_el2;
     uint64_t mpamhcr_el2;
 
@@ -1021,6 +1023,8 @@ struct ArchCPU {
     bool has_el2;
     /* CPU has security extension */
     bool has_el3;
+    /* CPU advertises FEAT_MPAM (machine must also provide the MSCs) */
+    bool has_mpam;
     /* CPU has PMU (Performance Monitor Unit) */
     bool has_pmu;
     /* CPU has VFP */
@@ -1124,6 +1128,7 @@ struct ArchCPU {
         uint32_t dbgdevid;
         uint32_t dbgdevid1;
         uint64_t reset_pmcr_el0;
+        uint64_t mpamidr_el1;
         uint64_t idregs[NUM_ID_IDX];
     } isar;
     uint64_t midr;

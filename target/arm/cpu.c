@@ -1319,6 +1319,9 @@ static const Property arm_cpu_has_el2_property =
 static const Property arm_cpu_has_el3_property =
             DEFINE_PROP_BOOL("has_el3", ARMCPU, has_el3, true);
 
+static const Property arm_cpu_has_mpam_property =
+            DEFINE_PROP_BOOL("has_mpam", ARMCPU, has_mpam, false);
+
 static const Property arm_cpu_has_gcie_property =
             DEFINE_PROP_BOOL("has_gcie", ARMCPU, has_gcie, false);
 #endif
@@ -1607,6 +1610,10 @@ static void arm_cpu_post_init(Object *obj)
 
     if (arm_feature(&cpu->env, ARM_FEATURE_EL2)) {
         qdev_property_add_static(DEVICE(obj), &arm_cpu_has_el2_property);
+    }
+
+    if (arm_feature(&cpu->env, ARM_FEATURE_AARCH64)) {
+        qdev_property_add_static(DEVICE(obj), &arm_cpu_has_mpam_property);
     }
 #endif
 
@@ -2332,8 +2339,22 @@ static void arm_cpu_realizefn(DeviceState *dev, Error **errp)
         /* FEAT_AMU (Activity Monitors Extension) */
         FIELD_DP64_IDREG(isar, ID_AA64PFR0, AMU, 0);
         FIELD_DP32_IDREG(isar, ID_PFR0, AMU, 0);
-        /* FEAT_MPAM (Memory Partitioning and Monitoring Extension) */
-        FIELD_DP64_IDREG(isar, ID_AA64PFR0, MPAM, 0);
+        /*
+         * FEAT_MPAM (Memory Partitioning and Monitoring Extension).
+         * Only advertise it when the machine actually provides the MSCs:
+         * named CPU models must not gain the feature implicitly.
+         *
+         * MPAMIDR.PMG_MAX is 3 while the board's MSCs currently expose a
+         * single PMG (MPAMF_IDR.PMG_MAX == 0); PMG-based configuration is
+         * not modelled yet.
+         */
+        if (cpu->has_mpam) {
+            FIELD_DP64_IDREG(isar, ID_AA64PFR0, MPAM, 1);
+            cpu->isar.mpamidr_el1 =
+                FIELD_DP64(cpu->isar.mpamidr_el1, MPAMIDR, PARTID_MAX, 63);
+            cpu->isar.mpamidr_el1 =
+                FIELD_DP64(cpu->isar.mpamidr_el1, MPAMIDR, PMG_MAX, 3);
+        }
     }
 
     /* MPU can be configured out of a PMSA CPU either by setting has-mpu

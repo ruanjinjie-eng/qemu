@@ -6558,6 +6558,56 @@ static void mpamhcr_el2_write(CPUARMState *env, const ARMCPRegInfo *ri,
     raw_write(env, ri, value & MPAMHCR_EL2_VALID_MASK);
 }
 
+#define MPAM0_EL1_VALID_MASK \
+    (R_MPAM0_EL1_PARTID_D_MASK | R_MPAM0_EL1_PMG_D_MASK)
+
+#define MPAM1_EL1_VALID_MASK \
+    (R_MPAM1_EL1_MPAMEN_MASK | R_MPAM1_EL1_PARTID_D_MASK | \
+     R_MPAM1_EL1_PMG_D_MASK | R_MPAM1_EL1_PARTID_I_MASK | \
+     R_MPAM1_EL1_PMG_I_MASK)
+
+static void mpam0_el1_write(CPUARMState *env, const ARMCPRegInfo *ri,
+                            uint64_t value)
+{
+    raw_write(env, ri, value & MPAM0_EL1_VALID_MASK);
+}
+
+static void mpam1_el1_write(CPUARMState *env, const ARMCPRegInfo *ri,
+                            uint64_t value)
+{
+    raw_write(env, ri, value & MPAM1_EL1_VALID_MASK);
+}
+
+static CPAccessResult access_mpamidr(CPUARMState *env,
+                                     const ARMCPRegInfo *ri, bool isread)
+{
+    if (arm_current_el(env) < 2 && arm_is_el2_enabled(env) &&
+        (env->mpamhcr_el2 & R_MPAMHCR_EL2_TRAP_MPAMIDR_EL1_MASK)) {
+        return CP_ACCESS_TRAP_EL2;
+    }
+    return CP_ACCESS_OK;
+}
+
+static CPAccessResult access_mpam1(CPUARMState *env,
+                                   const ARMCPRegInfo *ri, bool isread)
+{
+    if (arm_current_el(env) < 2 && arm_is_el2_enabled(env) &&
+        (env->mpam2_el2 & R_MPAM2_EL2_TRAPMPAM1EL1_MASK)) {
+        return CP_ACCESS_TRAP_EL2;
+    }
+    return CP_ACCESS_OK;
+}
+
+static CPAccessResult access_mpam0(CPUARMState *env,
+                                   const ARMCPRegInfo *ri, bool isread)
+{
+    if (arm_current_el(env) < 2 && arm_is_el2_enabled(env) &&
+        (env->mpam2_el2 & R_MPAM2_EL2_TRAPMPAM0EL1_MASK)) {
+        return CP_ACCESS_TRAP_EL2;
+    }
+    return CP_ACCESS_OK;
+}
+
 void register_cp_regs_for_features(ARMCPU *cpu)
 {
     /* Register all the coprocessor registers based on feature bits */
@@ -6943,6 +6993,25 @@ void register_cp_regs_for_features(ARMCPU *cpu)
               .fieldoffset = offsetof(CPUARMState, mpamhcr_el2),
               .resetvalue = 0,
               .writefn = mpamhcr_el2_write, .raw_writefn = raw_write },
+            { .name = "MPAMIDR_EL1", .state = ARM_CP_STATE_AA64,
+              .opc0 = 3, .opc1 = 0, .crn = 0xa, .crm = 4, .opc2 = 4,
+              .access = PL1_R, .type = ARM_CP_CONST,
+              .accessfn = access_mpamidr,
+              .resetvalue = cpu->isar.mpamidr_el1 },
+            { .name = "MPAM0_EL1", .state = ARM_CP_STATE_AA64,
+              .opc0 = 3, .opc1 = 0, .crn = 0xa, .crm = 5, .opc2 = 1,
+              .access = PL1_RW,
+              .accessfn = access_mpam0,
+              .fieldoffset = offsetof(CPUARMState, mpam0_el1),
+              .resetvalue = 0,
+              .writefn = mpam0_el1_write, .raw_writefn = raw_write },
+            { .name = "MPAM1_EL1", .state = ARM_CP_STATE_AA64,
+              .opc0 = 3, .opc1 = 0, .crn = 0xa, .crm = 5, .opc2 = 0,
+              .access = PL1_RW,
+              .accessfn = access_mpam1,
+              .fieldoffset = offsetof(CPUARMState, mpam1_el1),
+              .resetvalue = R_MPAM1_EL1_MPAMEN_MASK,
+              .writefn = mpam1_el1_write, .raw_writefn = raw_write },
             { .name = "MVFR1_EL1", .state = ARM_CP_STATE_AA64,
               .opc0 = 3, .opc1 = 0, .crn = 0, .crm = 3, .opc2 = 1,
               .access = PL1_R, .type = ARM_CP_CONST,

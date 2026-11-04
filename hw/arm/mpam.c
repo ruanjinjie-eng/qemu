@@ -116,6 +116,36 @@ REG32(MPAMF_MBWUMON_IDR, 0x0090)
     FIELD(MPAMF_MBWUMON_IDR, HAS_LONG, 30, 1)
     FIELD(MPAMF_MBWUMON_IDR, HAS_CAPTURE, 31, 1)
 
+REG32(MSMON_CFG_MON_SEL, 0x0800)
+    FIELD(MSMON_CFG_MON_SEL, MON_SEL, 0, 16)
+    FIELD(MSMON_CFG_MON_SEL, RIS, 24, 4)
+
+REG32(MSMON_CFG_MBWU_FLT, 0x0820)
+    FIELD(MSMON_CFG_MBWU_FLT, PARTID, 0, 16)
+    FIELD(MSMON_CFG_MBWU_FLT, PMG, 16, 8)
+    FIELD(MSMON_CFG_MBWU_FLT, RWBW, 30, 2)
+
+REG32(MSMON_CFG_MBWU_CTL, 0x0828)
+    FIELD(MSMON_CFG_MBWU_CTL, TYPE, 0, 8)
+    FIELD(MSMON_CFG_MBWU_CTL, MATCH_PARTID, 16, 1)
+    FIELD(MSMON_CFG_MBWU_CTL, MATCH_PMG, 17, 1)
+    FIELD(MSMON_CFG_MBWU_CTL, SCLEN, 19, 1)
+    FIELD(MSMON_CFG_MBWU_CTL, SUBTYPE, 20, 3)
+    FIELD(MSMON_CFG_MBWU_CTL, OFLOW_FRZ, 24, 1)
+    FIELD(MSMON_CFG_MBWU_CTL, OFLOW_INTR, 25, 1)
+    FIELD(MSMON_CFG_MBWU_CTL, OFLOW_STATUS, 26, 1)
+    FIELD(MSMON_CFG_MBWU_CTL, CAPT_RESET, 27, 1)
+    FIELD(MSMON_CFG_MBWU_CTL, CAPT_EVNT, 28, 3)
+    FIELD(MSMON_CFG_MBWU_CTL, EN, 31, 1)
+
+REG32(MSMON_MBWU, 0x0860)           /* 31-bit counter, bit31 NRDY */
+REG32(MSMON_MBWU_L, 0x0880)         /* 64-bit counter */
+REG32(MSMON_MBWU_CAPTURE, 0x0868)
+REG32(MSMON_MBWU_CAPTURE_L, 0x0890)
+REG32(MSMON_CAPT_EVNT, 0x0808)
+REG32(MSMON_CFG_CSU_FLT, 0x0810)
+REG32(MSMON_CFG_CSU_CTL, 0x0818)
+
 REG32(MPAMF_ERR_MSI_MPAM, 0x00dc)
 REG32(MPAMF_ERR_MSI_ADDR_L, 0x00e0)
 REG32(MPAMF_ERR_MSI_ADDR_H, 0x00e4)
@@ -239,6 +269,21 @@ typedef struct MpamfPerNrwId {
         uint32_t cfg_mbw_prop;
 } MpamfPerNrwId;
 
+/*
+ * One MBWU monitor instance.  The counter is lazily advanced on
+ * access: value = base + rate x (now - t0), where rate is the
+ * nominal bandwidth scaled by the MBW_MAX fraction of the filtered
+ * PARTID.  Monitoring therefore reads back values that track the
+ * configured bandwidth control.
+ */
+typedef struct MpamMbwuMon {
+    uint32_t flt;
+    uint32_t ctl;
+    uint64_t base;
+    int64_t t0;
+    bool oflow;
+} MpamMbwuMon;
+
 typedef struct Mpamf {
     uint64_t idr;
     uint32_t iidr;
@@ -264,6 +309,7 @@ typedef struct Mpamf {
 
     MpamfPerNrwId *per_nrw_id;
 
+    MpamMbwuMon *mbwu_mons;
     /* Array sizes for migration (derived from the MSC properties). */
     uint32_t num_partid_vm;
     uint32_t num_int_partid_vm;
@@ -279,10 +325,13 @@ typedef struct MPAMMSCState {
     uint8_t ris;
     uint16_t part_sel; /* Technically per ris, but in same reg */
     bool internal_part_sel;
+    uint32_t mon_sel;
     struct MemoryRegion mr;
     uint32_t num_partid;
     uint32_t num_int_partid;
     uint8_t num_ris;
+    uint32_t num_mbwu_mon;
+    uint64_t bw_nominal_bps;
 
     /*
      * Wired-interrupt GSIVs the board assigned (INTID = SPI + 32).  Zero
@@ -324,6 +373,48 @@ static uint32_t mpam_get_nrw_id(MPAMMSCState *s)
     }
 
     return intpartid % s->num_int_partid;
+}
+
+/*
+ * Resolve a request PARTID from a monitor filter onto the internal
+ * PARTID whose configuration governs it.
+ */
+static uint32_t mpam_nrw_id_for(MPAMMSCState *s, Mpamf *mf, uint32_t partid)
+{
+    uint32_t intpartid;
+
+    if (!FIELD_EX32(mf->idr, MPAMF_IDR, HAS_PARTID_NRW)) {
+        return partid;
+    }
+
+    intpartid = mf->cfg_intpartid[partid % s->num_partid];
+    return intpartid % s->num_int_partid;
+}
+
+static Mpamf *mpam_mon_ris(MPAMMSCState *s)
+{
+    unsigned ris = FIELD_EX32(s->mon_sel, MSMON_CFG_MON_SEL, RIS);
+
+    if (ris >= s->num_ris) {
+        qemu_log_mask(LOG_GUEST_ERROR,
+                      "MPAM: MON_SEL RIS %d out of range (num-ris %d)\n",
+                      ris, s->num_ris);
+        ris = 0;
+    }
+    return &s->mpamf[ris];
+}
+
+static MpamMbwuMon *mpam_mbwu_mon(MPAMMSCState *s, Mpamf *mf)
+{
+    unsigned mon = FIELD_EX32(s->mon_sel, MSMON_CFG_MON_SEL, MON_SEL);
+
+    if (mon >= s->num_mbwu_mon) {
+        qemu_log_mask(LOG_GUEST_ERROR,
+                      "MPAM: MON_SEL %d out of range (num-mbwu-mon %d)\n",
+                      mon, s->num_mbwu_mon);
+        mon = 0;
+    }
+    return &mf->mbwu_mons[mon];
 }
 
 typedef struct MPAMMSCMemState {
@@ -426,6 +517,7 @@ static const VMStateDescription vmstate_mpam_msc = {
         VMSTATE_UINT8(ris, MPAMMSCState),
         VMSTATE_UINT16(part_sel, MPAMMSCState),
         VMSTATE_BOOL(internal_part_sel, MPAMMSCState),
+        VMSTATE_UINT32(mon_sel, MPAMMSCState),
         VMSTATE_STRUCT_VARRAY_POINTER_UINT32(mpamf, MPAMMSCState,
                                              num_ris_vm,
                                              vmstate_mpamf, Mpamf),
@@ -524,6 +616,23 @@ static uint64_t mpam_msc_read_reg(void *opaque, hwaddr offset,
             return 0;
         }
         return mpamf->mbwumon_idr;
+    case A_MSMON_CFG_MON_SEL:
+        if (!FIELD_EX32(mpamf->idr, MPAMF_IDR, HAS_MSMON)) {
+            return 0;
+        }
+        return s->mon_sel;
+    case A_MSMON_CFG_MBWU_FLT:
+        return mpam_mbwu_mon(s, mpam_mon_ris(s))->flt;
+    case A_MSMON_CFG_MBWU_CTL:
+    {
+        MpamMbwuMon *m = mpam_mbwu_mon(s, mpam_mon_ris(s));
+        uint32_t ctl = m->ctl;
+
+        if (m->oflow) {
+            ctl |= R_MSMON_CFG_MBWU_CTL_OFLOW_STATUS_MASK;
+        }
+        return ctl;
+    }
     case A_MPAMF_ERR_MSI_MPAM:
         return mpamf->err_msi_mpam;
     case A_MPAMF_ERR_MSI_ADDR_L:
@@ -867,6 +976,48 @@ static void mpam_msc_write_reg(void *opaque, hwaddr offset, uint64_t value,
         }
         return;
     }
+    case A_MSMON_CFG_MON_SEL:
+        s->mon_sel = value & (R_MSMON_CFG_MON_SEL_MON_SEL_MASK |
+                              R_MSMON_CFG_MON_SEL_RIS_MASK);
+        return;
+    case A_MSMON_CFG_MBWU_FLT:
+        {
+            uint32_t mask = R_MSMON_CFG_MBWU_FLT_PARTID_MASK |
+                            R_MSMON_CFG_MBWU_FLT_PMG_MASK;
+
+            if (FIELD_EX32(mpamf->mbwumon_idr, MPAMF_MBWUMON_IDR,
+                           HAS_RWBW)) {
+                mask |= R_MSMON_CFG_MBWU_FLT_RWBW_MASK;
+            }
+            mpam_mbwu_mon(s, mpam_mon_ris(s))->flt = value & mask;
+        }
+        return;
+    case A_MSMON_CFG_MBWU_CTL:
+    {
+        MpamMbwuMon *m = mpam_mbwu_mon(s, mpam_mon_ris(s));
+
+        m->ctl = value & (R_MSMON_CFG_MBWU_CTL_TYPE_MASK |
+                          R_MSMON_CFG_MBWU_CTL_MATCH_PARTID_MASK |
+                          R_MSMON_CFG_MBWU_CTL_MATCH_PMG_MASK |
+                          R_MSMON_CFG_MBWU_CTL_SCLEN_MASK |
+                          R_MSMON_CFG_MBWU_CTL_SUBTYPE_MASK |
+                          R_MSMON_CFG_MBWU_CTL_OFLOW_FRZ_MASK |
+                          R_MSMON_CFG_MBWU_CTL_OFLOW_INTR_MASK |
+                          R_MSMON_CFG_MBWU_CTL_CAPT_RESET_MASK |
+                          R_MSMON_CFG_MBWU_CTL_CAPT_EVNT_MASK |
+                          R_MSMON_CFG_MBWU_CTL_EN_MASK);
+        if (value & R_MSMON_CFG_MBWU_CTL_OFLOW_STATUS_MASK) {
+            m->oflow = false;               /* write-one-to-clear */
+        }
+        return;
+    }
+    case A_MSMON_CAPT_EVNT:
+    case A_MSMON_CFG_CSU_FLT:
+    case A_MSMON_CFG_CSU_CTL:
+        qemu_log_mask(LOG_UNIMP,
+                      "MPAM: cache-usage monitoring not implemented (write %lx)\n",
+                      offset);
+        return;
     case A_MPAMF_ECR:
         if (value & ~MPAMF_ECR_WRITE_MASK) {
             qemu_log_mask(LOG_UNIMP,
@@ -905,6 +1056,7 @@ static void mpam_msc_state_init(MPAMMSCState *s)
     s->ris = 0;
     s->part_sel = 0;
     s->internal_part_sel = false;
+    s->mon_sel = 0;
     s->ecr = 0;
     s->esr = 0;
 
@@ -917,6 +1069,8 @@ static void mpam_msc_state_init(MPAMMSCState *s)
                sizeof(MpamfPerNrwId) * s->num_int_partid);
         memset(mpamf->cfg_intpartid, 0,
                sizeof(uint32_t) * s->num_partid);
+        memset(mpamf->mbwu_mons, 0,
+               sizeof(MpamMbwuMon) * s->num_mbwu_mon);
         /*
          * Until software programs the map, wrap each request PARTID onto an
          * internal PARTID so the narrowing indirection is always in range.
@@ -970,6 +1124,7 @@ static bool mpam_msc_realize(DeviceState *dev, Error **errp)
         s->mpamf[i].num_int_partid_vm = s->num_int_partid;
         s->mpamf[i].per_nrw_id = g_new0(MpamfPerNrwId, s->num_int_partid);
         s->mpamf[i].cfg_intpartid = g_new0(uint32_t, s->num_partid);
+        s->mpamf[i].mbwu_mons = g_new0(MpamMbwuMon, s->num_mbwu_mon);
     }
 
     mpam_msc_state_init(s);
@@ -1136,6 +1291,9 @@ static const Property mpam_msc_props[] = {
     DEFINE_PROP_UINT8("num-ris", MPAMMSCState, num_ris, 1),
     DEFINE_PROP_UINT32("num-partid", MPAMMSCState, num_partid, 1),
     DEFINE_PROP_UINT32("num-int-partid", MPAMMSCState, num_int_partid, 0),
+    DEFINE_PROP_UINT32("num-mbwu-mon", MPAMMSCState, num_mbwu_mon, 8),
+    DEFINE_PROP_UINT64("bw-nominal-bps", MPAMMSCState, bw_nominal_bps,
+                       10000000000ULL),  /* 10 GB/s default bandwidth */
     DEFINE_PROP_UINT32("err-gsiv", MPAMMSCState, err_gsiv, 0),
     DEFINE_PROP_UINT32("oflow-gsiv", MPAMMSCState, oflow_gsiv, 0),
     DEFINE_PROP_UINT16("node", MPAMMSCState, node, UINT16_MAX),

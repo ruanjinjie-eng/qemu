@@ -267,6 +267,8 @@ typedef struct MpamfPerNrwId {
         uint32_t cfg_mbw_pbm[(MPAM_MBW_PART + 31) / 32];
         uint32_t cfg_pri;
         uint32_t cfg_cmax;
+        uint32_t cfg_cmin;
+        uint32_t cfg_cassoc;
         uint32_t cfg_mbw_min;
         uint32_t cfg_mbw_max;
         uint32_t cfg_mbw_prop;
@@ -542,6 +544,8 @@ static const VMStateDescription vmstate_mpamf_per_nrw_id = {
                              (MPAM_MBW_PART + 31) / 32),
         VMSTATE_UINT32(cfg_pri, MpamfPerNrwId),
         VMSTATE_UINT32(cfg_cmax, MpamfPerNrwId),
+        VMSTATE_UINT32(cfg_cmin, MpamfPerNrwId),
+        VMSTATE_UINT32(cfg_cassoc, MpamfPerNrwId),
         VMSTATE_UINT32(cfg_mbw_min, MpamfPerNrwId),
         VMSTATE_UINT32(cfg_mbw_max, MpamfPerNrwId),
         VMSTATE_UINT32(cfg_mbw_prop, MpamfPerNrwId),
@@ -809,6 +813,22 @@ static uint64_t mpam_msc_read_reg(void *opaque, hwaddr offset,
             return 0;
         }
         return mpamf->per_nrw_id[nrw_part_sel].cfg_cmax;
+    case A_MPAMF_MPAMCFG_CMIN:
+        if (!FIELD_EX32(mpamf->idr, MPAMF_IDR, HAS_CCAP_PART) ||
+            !FIELD_EX32(mpamf->ccap_idr, MPAMF_CCAP_IDR, HAS_CMIN)) {
+            qemu_log_mask(LOG_UNIMP,
+                "MPAM: Unexpected read of CMIN with no CMIN support\n");
+            return 0;
+        }
+        return mpamf->per_nrw_id[nrw_part_sel].cfg_cmin;
+    case A_MPAMF_MPAMCFG_CASSOC:
+        if (!FIELD_EX32(mpamf->idr, MPAMF_IDR, HAS_CCAP_PART) ||
+            !FIELD_EX32(mpamf->ccap_idr, MPAMF_CCAP_IDR, HAS_CASSOC)) {
+            qemu_log_mask(LOG_UNIMP,
+                "MPAM: Unexpected read of CASSOC with no CASSOC support\n");
+            return 0;
+        }
+        return mpamf->per_nrw_id[nrw_part_sel].cfg_cassoc;
     case A_MPAMF_MPAMCFG_MBW_MIN:
         if (!FIELD_EX32(mpamf->idr, MPAMF_IDR, HAS_MBW_PART) ||
             !FIELD_EX32(mpamf->mbw_idr, MPAMF_MBW_IDR, HAS_MIN)) {
@@ -958,6 +978,47 @@ static void mpam_msc_write_reg(void *opaque, hwaddr offset, uint64_t value,
                           valid, value);
         }
         mpamf->per_nrw_id[nrw_part_sel].cfg_cmax = value & valid;
+        return;
+    }
+    case A_MPAMF_MPAMCFG_CMIN:
+    {
+        uint32_t wd, valid;
+
+        if (!FIELD_EX32(mpamf->idr, MPAMF_IDR, HAS_CCAP_PART) ||
+            !FIELD_EX32(mpamf->ccap_idr, MPAMF_CCAP_IDR, HAS_CMIN)) {
+            qemu_log_mask(LOG_UNIMP,
+                          "MPAM: Unexpected write to CMIN when not supported\n");
+            return;
+        }
+        /* CMIN uses the same implemented width as CMAX (IHI 0099 5.2.4). */
+        wd = FIELD_EX32(mpamf->ccap_idr, MPAMF_CCAP_IDR, CMAX_WD);
+        valid = mpam_fracwd_mask(wd);
+        if (value & ~valid) {
+            qemu_log_mask(LOG_UNIMP,
+                          "MPAM: Unexpected write to CMIN Mask=%x Value=%lx\n",
+                          valid, value);
+        }
+        mpamf->per_nrw_id[nrw_part_sel].cfg_cmin = value & valid;
+        return;
+    }
+    case A_MPAMF_MPAMCFG_CASSOC:
+    {
+        uint32_t wd, valid;
+
+        if (!FIELD_EX32(mpamf->idr, MPAMF_IDR, HAS_CCAP_PART) ||
+            !FIELD_EX32(mpamf->ccap_idr, MPAMF_CCAP_IDR, HAS_CASSOC)) {
+            qemu_log_mask(LOG_UNIMP,
+                          "MPAM: Unexpected write to CASSOC when not supported\n");
+            return;
+        }
+        wd = FIELD_EX32(mpamf->ccap_idr, MPAMF_CCAP_IDR, CASSOC_WD);
+        valid = mpam_fracwd_mask(wd);
+        if (value & ~valid) {
+            qemu_log_mask(LOG_UNIMP,
+                          "MPAM: Unexpected write to CASSOC Mask=%x Value=%lx\n",
+                          valid, value);
+        }
+        mpamf->per_nrw_id[nrw_part_sel].cfg_cassoc = value & valid;
         return;
     }
     case A_MPAMF_MPAMCFG_MBW_MIN:

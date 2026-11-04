@@ -299,14 +299,18 @@ typedef struct MPAMMSCState {
 static uint32_t mpam_get_nrw_id(MPAMMSCState *s)
 {
     Mpamf *mpamf = &s->mpamf[s->ris];
+    uint32_t intpartid;
 
     if (!FIELD_EX32(mpamf->idr, MPAMF_IDR, HAS_PARTID_NRW)) {
         return s->part_sel;
     }
     if (s->internal_part_sel) {
-        return s->part_sel;
+        intpartid = s->part_sel;
+    } else {
+        intpartid = mpamf->cfg_intpartid[s->part_sel];
     }
-    return mpamf->cfg_intpartid[s->part_sel];
+
+    return intpartid % s->num_int_partid;
 }
 
 typedef struct MPAMMSCMemState {
@@ -523,6 +527,17 @@ static uint64_t mpam_msc_read_reg(void *opaque, hwaddr offset,
         return mpamf->esr;
     case A_MPAMCFG_PART_SEL:
         return mpamf->cfg_part_sel;
+    case A_MPAMF_MPAMCFG_INTPARTID: {
+        /*
+         * The map is only meaningful for resources that implement
+         * narrowing; others read as zero.
+         */
+        if (!FIELD_EX32(mpamf->idr, MPAMF_IDR, HAS_PARTID_NRW)) {
+            return 0;
+        }
+
+        return mpamf->cfg_intpartid[s->part_sel];
+    }
     case A_MPAMF_MPAMCFG_CMAX:
         if (!FIELD_EX32(mpamf->idr, MPAMF_IDR, HAS_CCAP_PART) ||
             FIELD_EX32(mpamf->ccap_idr, MPAMF_CCAP_IDR, NO_CMAX)) {
@@ -626,11 +641,37 @@ static void mpam_msc_write_reg(void *opaque, hwaddr offset, uint64_t value,
                           s->num_ris);
             return;
         }
+        {
+            /*
+             * IHI 0099 7.2.1: the MSC does not check PARTID_SEL on write
+             * (the first IMPLEMENTATION DEFINED behaviour); the selector
+             * wraps into the supported PARTID space instead.
+             */
+            uint32_t limit = FIELD_EX32(value, MPAMCFG_PART_SEL, INTERNAL) ?
+                             s->num_int_partid : s->num_partid;
+
+            s->part_sel = FIELD_EX32(value, MPAMCFG_PART_SEL, PARTID_SEL) % limit;
+        }
         s->ris = ris;
-        s->part_sel = FIELD_EX32(value, MPAMCFG_PART_SEL, PARTID_SEL);
         s->internal_part_sel = FIELD_EX32(value, MPAMCFG_PART_SEL, INTERNAL);
         mpamf = &s->mpamf[s->ris];
         mpamf->cfg_part_sel = value & MPAMCFG_PART_SEL_WRITE_MASK;
+        return;
+    }
+    case A_MPAMF_MPAMCFG_INTPARTID:
+        if (value & ~MPAMF_MPAMCFG_INTPARTID_WRITE_MASK) {
+            qemu_log_mask(LOG_UNIMP,
+                          "MPAM: Unexpected write to INTPARTID Mask=%x Value=%lx\n",
+                          MPAMF_MPAMCFG_INTPARTID_WRITE_MASK, value);
+        }
+        if (!FIELD_EX32(mpamf->idr, MPAMF_IDR, HAS_PARTID_NRW)) {
+            qemu_log_mask(LOG_UNIMP,
+                          "MPAM: Unexpected write to INTPARTID when !HAS_PARTID_NRW\n");
+            return;
+        }
+
+        mpamf->cfg_intpartid[s->part_sel] =
+            FIELD_EX32(value, MPAMF_MPAMCFG_INTPARTID, INTPARTID);
         return;
     case A_MPAMF_MPAMCFG_CMAX:
     {
@@ -863,6 +904,21 @@ static void mpam_msc_state_init(MPAMMSCState *s)
                sizeof(MpamfPerNrwId) * s->num_int_partid);
         memset(mpamf->cfg_intpartid, 0,
                sizeof(uint32_t) * s->num_partid);
+        /*
+         * Until software programs the map, wrap each request PARTID onto an
+         * internal PARTID so the narrowing indirection is always in range.
+         */
+        for (int p = 0; p < s->num_partid; p++) {
+            mpamf->cfg_intpartid[p] = p % s->num_int_partid;
+        }
+        /*
+         * per_nrw_id is indexed by INTERNAL PARTID: it has num_int_partid
+         * entries, not num_partid.
+         */
+        for (int p = 0; p < s->num_int_partid; p++) {
+            /* MBW_MAX resets to full bandwidth on real hardware */
+            mpamf->per_nrw_id[p].cfg_mbw_max = 0xffff;
+        }
     }
 }
 

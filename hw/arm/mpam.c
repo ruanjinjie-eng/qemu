@@ -469,6 +469,13 @@ static uint64_t mpam_msc_read_reg(void *opaque, hwaddr offset,
             return 0;
         }
         return mpamf->cpor_idr;
+    case A_MPAMF_CCAP_IDR:
+        if (!FIELD_EX32(mpamf->idr, MPAMF_IDR, HAS_CCAP_PART)) {
+            qemu_log_mask(LOG_UNIMP,
+                "MPAM: Unexpected read of CCAP_IDR with no CCAP support\n");
+            return 0;
+        }
+        return mpamf->ccap_idr;
     case A_MPAMF_MBW_IDR:
         return mpamf->mbw_idr;
     case A_MPAMF_PRI_IDR:
@@ -502,6 +509,14 @@ static uint64_t mpam_msc_read_reg(void *opaque, hwaddr offset,
         return mpamf->mbwumon_idr;
     case A_MPAMCFG_PART_SEL:
         return mpamf->cfg_part_sel;
+    case A_MPAMF_MPAMCFG_CMAX:
+        if (!FIELD_EX32(mpamf->idr, MPAMF_IDR, HAS_CCAP_PART) ||
+            FIELD_EX32(mpamf->ccap_idr, MPAMF_CCAP_IDR, NO_CMAX)) {
+            qemu_log_mask(LOG_UNIMP,
+                "MPAM: Unexpected read of CMAX with no CMAX support\n");
+            return 0;
+        }
+        return mpamf->per_nrw_id[nrw_part_sel].cfg_cmax;
     case A_MPAMF_MPAMCFG_MBW_MIN:
         if (!FIELD_EX32(mpamf->idr, MPAMF_IDR, HAS_MBW_PART) ||
             !FIELD_EX32(mpamf->mbw_idr, MPAMF_MBW_IDR, HAS_MIN)) {
@@ -603,6 +618,30 @@ static void mpam_msc_write_reg(void *opaque, hwaddr offset, uint64_t value,
         mpamf = &s->mpamf[s->ris];
         mpamf->cfg_part_sel = value & MPAMCFG_PART_SEL_WRITE_MASK;
         return;
+    case A_MPAMF_MPAMCFG_CMAX:
+    {
+        uint32_t wd, valid;
+
+        if (!FIELD_EX32(mpamf->idr, MPAMF_IDR, HAS_CCAP_PART) ||
+            FIELD_EX32(mpamf->ccap_idr, MPAMF_CCAP_IDR, NO_CMAX)) {
+            qemu_log_mask(LOG_UNIMP,
+                          "MPAM: Unexpected write to CMAX when not supported\n");
+            return;
+        }
+        wd = FIELD_EX32(mpamf->ccap_idr, MPAMF_CCAP_IDR, CMAX_WD);
+        valid = mpam_fracwd_mask(wd);
+        if (FIELD_EX32(mpamf->ccap_idr, MPAMF_CCAP_IDR,
+                       HAS_CMAX_SOFTLIM)) {
+            valid |= R_MPAMF_MPAMCFG_CMAX_SOFTLIM_MASK;
+        }
+        if (value & ~valid) {
+            qemu_log_mask(LOG_UNIMP,
+                          "MPAM: Unexpected write to CMAX Mask=%x Value=%lx\n",
+                          valid, value);
+        }
+        mpamf->per_nrw_id[nrw_part_sel].cfg_cmax = value & valid;
+        return;
+    }
     case A_MPAMF_MPAMCFG_MBW_MIN:
     {
         uint32_t wd, valid;
@@ -948,6 +987,7 @@ static void mpam_msc_cache_realize(DeviceState *dev, Error **errp)
 
         /* Cache specific bit */
         mpamf->idr = FIELD_DP64(mpamf->idr, MPAMF_IDR, HAS_CPOR_PART, 1);
+        mpamf->idr = FIELD_DP64(mpamf->idr, MPAMF_IDR, HAS_CCAP_PART, 1);
         mpamf->idr = FIELD_DP64(mpamf->idr, MPAMF_IDR, HAS_PRI_PART, 1);
         mpamf->idr = FIELD_DP64(mpamf->idr, MPAMF_IDR, HAS_PARTID_NRW,
                                 s->num_int_partid < s->num_partid);
@@ -972,6 +1012,20 @@ static void mpam_msc_cache_realize(DeviceState *dev, Error **errp)
                                     INTPRI_0_IS_LOW, 1);
         mpamf->pri_idr = FIELD_DP32(mpamf->pri_idr, MPAMF_PRI_IDR,
                                     INTPRI_WD, 2);
+
+        /* Capacity Partitioning */
+        mpamf->ccap_idr = FIELD_DP32(mpamf->ccap_idr, MPAMF_CCAP_IDR,
+                                     HAS_CMAX_SOFTLIM, 1);
+        mpamf->ccap_idr = FIELD_DP32(mpamf->ccap_idr, MPAMF_CCAP_IDR,
+                                     NO_CMAX, 0);
+        mpamf->ccap_idr = FIELD_DP32(mpamf->ccap_idr, MPAMF_CCAP_IDR,
+                                     HAS_CMIN, 1);
+        mpamf->ccap_idr = FIELD_DP32(mpamf->ccap_idr, MPAMF_CCAP_IDR,
+                                     HAS_CASSOC, 1);
+        mpamf->ccap_idr = FIELD_DP32(mpamf->ccap_idr, MPAMF_CCAP_IDR,
+                                     CASSOC_WD, 4);
+        mpamf->ccap_idr = FIELD_DP32(mpamf->ccap_idr, MPAMF_CCAP_IDR,
+                                     CMAX_WD, 4);
 
         if (s->num_int_partid < s->num_partid) {
             mpamf->partid_nrw_idr = FIELD_DP32(mpamf->partid_nrw_idr,

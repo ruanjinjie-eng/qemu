@@ -2133,6 +2133,14 @@ static void create_virtio_iommu_dt_bindings(VirtMachineState *vms)
     }
 }
 
+/*
+ * Partitioning geometry for board-created MSCs: 256 request PARTIDs
+ * narrowed to 32 internal PARTIDs (enables HAS_PARTID_NRW, so resctrl
+ * reports num_closids=32).
+ */
+#define MPAM_VIRT_NUM_PARTID     256
+#define MPAM_VIRT_NUM_INTPARTID  32
+
 static void create_pcie(VirtMachineState *vms)
 {
     hwaddr base_mmio = vms->memmap[VIRT_PCIE_MMIO].base;
@@ -2871,6 +2879,44 @@ static void virt_post_cpus_gic_realized(VirtMachineState *vms,
     }
 }
 
+/*
+ * The MPAM ACPI table cross-references PPTT cache nodes by Cache ID.  If the
+ * user did not describe the cache topology, PPTT is built without cache
+ * nodes, so the cache MSCs created below would point at IDs that do not
+ * exist and the guest would fail to probe the whole MPAM device.  Pick a
+ * topology that matches the MSCs the board creates.
+ */
+static void virt_mpam_default_cache_topo(VirtMachineState *vms)
+{
+    MachineState *ms = MACHINE(vms);
+
+    if (!vms->mpam) {
+        return;
+    }
+
+    if (machine_get_cache_topo_level(ms, CACHE_LEVEL_AND_TYPE_L1D) !=
+            CPU_TOPOLOGY_LEVEL_DEFAULT ||
+        machine_get_cache_topo_level(ms, CACHE_LEVEL_AND_TYPE_L1I) !=
+            CPU_TOPOLOGY_LEVEL_DEFAULT ||
+        machine_get_cache_topo_level(ms, CACHE_LEVEL_AND_TYPE_L2) !=
+            CPU_TOPOLOGY_LEVEL_DEFAULT ||
+        machine_get_cache_topo_level(ms, CACHE_LEVEL_AND_TYPE_L3) !=
+            CPU_TOPOLOGY_LEVEL_DEFAULT) {
+        return;
+    }
+
+    machine_set_cache_topo_level(ms, CACHE_LEVEL_AND_TYPE_L1D,
+                                 CPU_TOPOLOGY_LEVEL_CORE);
+    machine_set_cache_topo_level(ms, CACHE_LEVEL_AND_TYPE_L1I,
+                                 CPU_TOPOLOGY_LEVEL_CORE);
+    machine_set_cache_topo_level(ms, CACHE_LEVEL_AND_TYPE_L2,
+                                 ms->smp.clusters > 1 ?
+                                 CPU_TOPOLOGY_LEVEL_CLUSTER :
+                                 CPU_TOPOLOGY_LEVEL_CORE);
+    machine_set_cache_topo_level(ms, CACHE_LEVEL_AND_TYPE_L3,
+                                 CPU_TOPOLOGY_LEVEL_SOCKET);
+}
+
 static void machvirt_init(MachineState *machine)
 {
     VirtMachineState *vms = VIRT_MACHINE(machine);
@@ -2888,6 +2934,13 @@ static void machvirt_init(MachineState *machine)
     unsigned int max_cpus = machine->smp.max_cpus;
 
     possible_cpus = mc->possible_cpu_arch_ids(machine);
+
+    /*
+     * Must happen before create_fdt() and the ACPI/PPTT build: the MPAM
+     * table points at PPTT Cache IDs, so a default topology is needed
+     * whenever MPAM is enabled but the user did not describe the caches.
+     */
+    virt_mpam_default_cache_topo(vms);
 
     /*
      * In accelerated mode, the memory map is computed earlier in kvm_type()
@@ -3050,6 +3103,14 @@ static void machvirt_init(MachineState *machine)
 
         if (!vms->virt && object_property_find(cpuobj, "has_el2")) {
             object_property_set_bool(cpuobj, "has_el2", false, NULL);
+        }
+
+        /*
+         * Advertise FEAT_MPAM only when the machine also exposes the
+         * memory-system components it describes.
+         */
+        if (vms->mpam && object_property_find(cpuobj, "has_mpam")) {
+            object_property_set_bool(cpuobj, "has_mpam", true, NULL);
         }
 
         if (vmc->no_kvm_steal_time &&
@@ -3496,6 +3557,20 @@ static void virt_set_virtio_transports(Object *obj, Visitor *v,
     }
 
     vms->virtio_transports = transports;
+}
+
+static bool virt_get_mpam(Object *obj, Error **errp)
+{
+    VirtMachineState *vms = VIRT_MACHINE(obj);
+
+    return vms->mpam;
+}
+
+static void virt_set_mpam(Object *obj, bool value, Error **errp)
+{
+    VirtMachineState *vms = VIRT_MACHINE(obj);
+
+    vms->mpam = value;
 }
 
 static bool virt_get_dtb_randomness(Object *obj, Error **errp)
@@ -4302,6 +4377,11 @@ static void virt_machine_class_init(ObjectClass *oc, const void *data)
                                           "Set on/off to enable/disable emulating a "
                                           "guest CPU which implements the ARM "
                                           "Memory Tagging Extension");
+
+    object_class_property_add_bool(oc, "mpam", virt_get_mpam, virt_set_mpam);
+    object_class_property_set_description(oc, "mpam",
+                                          "Set on/off to enable/disable "
+                                          "emulation of MPAM MSCs");
 
     object_class_property_add_bool(oc, "its", virt_get_its,
                                    virt_set_its);

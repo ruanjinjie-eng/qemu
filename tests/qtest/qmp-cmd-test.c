@@ -105,6 +105,7 @@ static bool query_is_ignored(const char *cmd)
         /* Success depends on target-specific build configuration: */
         "query-pci",              /* CONFIG_PCI */
         "x-query-virtio",         /* CONFIG_VIRTIO */
+        "query-mpam-cache",       /* CONFIG_MPAM (arm only) */
         /* Success depends on launching SEV guest */
         "query-sev-launch-measure",
         /* Success depends on Host or Hypervisor SEV support */

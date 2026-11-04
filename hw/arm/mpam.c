@@ -449,6 +449,13 @@ static uint64_t mpam_msc_read_reg(void *opaque, hwaddr offset,
             return 0;
         }
         return mpamf->impl_idr;
+    case A_MPAMF_CPOR_IDR:
+        if (!FIELD_EX32(mpamf->idr, MPAMF_IDR, HAS_CPOR_PART)) {
+            qemu_log_mask(LOG_UNIMP,
+                "MPAM: Unexpected read of CPOR_IDR with no CPOR support\n");
+            return 0;
+        }
+        return mpamf->cpor_idr;
     case A_MPAMF_PARTID_NRW_IDR: {
         return mpamf->partid_nrw_idr;
     }
@@ -473,6 +480,19 @@ static uint64_t mpam_msc_read_reg(void *opaque, hwaddr offset,
         return mpamf->mbwumon_idr;
     case A_MPAMCFG_PART_SEL:
         return mpamf->cfg_part_sel;
+    case A_MPAMF_MPAMCFG_CPBM0...
+        (A_MPAMF_MPAMCFG_CPBM0 + ((MPAM_CACHE_PART + 31) / 32 - 1) * 4):
+    {
+        uint32_t array_offset;
+
+        if (!FIELD_EX32(mpamf->idr, MPAMF_IDR, HAS_CPOR_PART)) {
+            qemu_log_mask(LOG_UNIMP,
+                "MPAM: Unexpected read of CPBM with no CPOR support\n");
+            return 0;
+        }
+        array_offset = (offset - A_MPAMF_MPAMCFG_CPBM0) / sizeof(uint32_t);
+        return mpamf->per_nrw_id[nrw_part_sel].cfg_cpbm[array_offset];
+    }
     default:
         qemu_log_mask(LOG_UNIMP,
                       "MPAM: Unexpected read of %lx\n", offset);
@@ -516,6 +536,36 @@ static void mpam_msc_write_reg(void *opaque, hwaddr offset, uint64_t value,
         mpamf = &s->mpamf[s->ris];
         mpamf->cfg_part_sel = value & MPAMCFG_PART_SEL_WRITE_MASK;
         return;
+    case A_MPAMF_MPAMCFG_CPBM0...
+        (A_MPAMF_MPAMCFG_CPBM0 + ((MPAM_CACHE_PART + 31) / 32 - 1) * 4):
+    {
+        uint32_t array_offset;
+
+        if (!FIELD_EX32(mpamf->idr, MPAMF_IDR, HAS_CPOR_PART)) {
+            qemu_log_mask(LOG_UNIMP,
+                          "MPAM: Unexpected write to CPBM when !HAS_CPOR_PART\n");
+            return;
+        }
+        array_offset = (offset - A_MPAMF_MPAMCFG_CPBM0) / sizeof(uint32_t);
+        {
+            uint32_t cpbm_wd = FIELD_EX32(mpamf->cpor_idr,
+                                          MPAMF_CPOR_IDR, CPBM_WD);
+            uint32_t bit = array_offset * 32;
+            uint32_t mask;
+
+            if (bit >= cpbm_wd) {
+                qemu_log_mask(LOG_GUEST_ERROR,
+                              "MPAM: CPBM%d out of range (CPBM_WD %u)\n",
+                              array_offset, cpbm_wd);
+                return;
+            }
+            mask = cpbm_wd - bit >= 32 ? UINT32_MAX :
+                   (uint32_t)MAKE_64BIT_MASK(0, cpbm_wd - bit);
+            mpamf->per_nrw_id[nrw_part_sel].cfg_cpbm[array_offset] =
+                value & mask;
+        }
+        return;
+    }
     default:
         qemu_log_mask(LOG_UNIMP,
                       "MPAM: Write to unexpected register Addr %lx Value=%lx\n",
@@ -679,6 +729,8 @@ static void mpam_msc_cache_realize(DeviceState *dev, Error **errp)
         /* Need to implement for RME */
         mpamf->idr = FIELD_DP64(mpamf->idr, MPAMF_IDR, SP4, 0);
 
+        /* Cache specific bit */
+        mpamf->idr = FIELD_DP64(mpamf->idr, MPAMF_IDR, HAS_CPOR_PART, 1);
         mpamf->idr = FIELD_DP64(mpamf->idr, MPAMF_IDR, HAS_PARTID_NRW,
                                 s->num_int_partid < s->num_partid);
 
@@ -690,6 +742,10 @@ static void mpam_msc_cache_realize(DeviceState *dev, Error **errp)
 
         mpamf->aidr = FIELD_DP32(mpamf->aidr, MPAMF_AIDR, ARCH_MINOR_REV, 1);
         mpamf->aidr = FIELD_DP32(mpamf->aidr, MPAMF_AIDR, ARCH_MAJOR_REV, 1);
+
+        /* Portion */
+        mpamf->cpor_idr = FIELD_DP32(mpamf->cpor_idr, MPAMF_CPOR_IDR, CPBM_WD,
+                                     MPAM_CACHE_PART);
 
         if (s->num_int_partid < s->num_partid) {
             mpamf->partid_nrw_idr = FIELD_DP32(mpamf->partid_nrw_idr,

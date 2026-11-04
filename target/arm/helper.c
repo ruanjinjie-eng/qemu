@@ -6534,6 +6534,30 @@ static const ARMCPRegInfo fgwte3_reginfo[] = {
     },
 };
 
+#define MPAM2_EL2_VALID_MASK \
+    (R_MPAM2_EL2_MPAMEN_MASK | R_MPAM2_EL2_TIDR_MASK | \
+     R_MPAM2_EL2_ALTSP_HFC_MASK | R_MPAM2_EL2_ALTSP_EL2_MASK | \
+     R_MPAM2_EL2_ALTSP_FRCD_MASK | R_MPAM2_EL2_EnMPAMSM_MASK | \
+     R_MPAM2_EL2_TRAPMPAM0EL1_MASK | R_MPAM2_EL2_TRAPMPAM1EL1_MASK | \
+     R_MPAM2_EL2_PMG_D_MASK | R_MPAM2_EL2_PMG_I_MASK | \
+     R_MPAM2_EL2_PARTID_D_MASK | R_MPAM2_EL2_PARTID_I_MASK)
+
+#define MPAMHCR_EL2_VALID_MASK \
+    (R_MPAMHCR_EL2_TRAP_MPAMIDR_EL1_MASK | R_MPAMHCR_EL2_GSTAPP_PLK_MASK | \
+     R_MPAMHCR_EL2_EL1_VPMEN_MASK | R_MPAMHCR_EL2_EL0_VPMEN_MASK)
+
+static void mpam2_el2_write(CPUARMState *env, const ARMCPRegInfo *ri,
+                            uint64_t value)
+{
+    raw_write(env, ri, value & MPAM2_EL2_VALID_MASK);
+}
+
+static void mpamhcr_el2_write(CPUARMState *env, const ARMCPRegInfo *ri,
+                              uint64_t value)
+{
+    raw_write(env, ri, value & MPAMHCR_EL2_VALID_MASK);
+}
+
 void register_cp_regs_for_features(ARMCPU *cpu)
 {
     /* Register all the coprocessor registers based on feature bits */
@@ -6907,6 +6931,18 @@ void register_cp_regs_for_features(ARMCPU *cpu)
               .access = PL1_R, .type = ARM_CP_CONST,
               .accessfn = access_tid3,
               .resetvalue = cpu->isar.mvfr0 },
+            { .name = "MPAM2_EL2", .state = ARM_CP_STATE_AA64,
+              .opc0 = 3, .opc1 = 4, .crn = 0xa, .crm = 5, .opc2 = 0,
+              .access = PL2_RW,
+              .fieldoffset = offsetof(CPUARMState, mpam2_el2),
+              .resetvalue = 0,
+              .writefn = mpam2_el2_write, .raw_writefn = raw_write },
+            { .name = "MPAMHCR_EL2", .state = ARM_CP_STATE_AA64,
+              .opc0 = 3, .opc1 = 4, .crn = 0xa, .crm = 4, .opc2 = 0,
+              .access = PL2_RW,
+              .fieldoffset = offsetof(CPUARMState, mpamhcr_el2),
+              .resetvalue = 0,
+              .writefn = mpamhcr_el2_write, .raw_writefn = raw_write },
             { .name = "MVFR1_EL1", .state = ARM_CP_STATE_AA64,
               .opc0 = 3, .opc1 = 0, .crn = 0, .crm = 3, .opc2 = 1,
               .access = PL1_R, .type = ARM_CP_CONST,

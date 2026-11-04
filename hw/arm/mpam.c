@@ -180,6 +180,14 @@ REG64(MPAMF_ESR, 0x00f8)
     FIELD(MPAMF_ESR, OVRWR, 31, 1)
     FIELD(MPAMF_ESR, RIS, 32, 4)
 
+/* IHI 0099 Table 7-1: MPAMF_ESR.ERR_CODE encodings this model can raise */
+#define MPAM_ERRCODE_PARTID_SEL_RANGE    1
+#define MPAM_ERRCODE_MSMONCFG_ID_RANGE   3
+#define MPAM_ERRCODE_MONITOR_RANGE       5
+#define MPAM_ERRCODE_INTPARTID_RANGE     6
+#define MPAM_ERRCODE_UNDEF_RIS_PART_SEL  8
+#define MPAM_ERRCODE_UNDEF_RIS_MON_SEL  10
+
 REG32(MPAMCFG_PART_SEL, 0x0100)
     FIELD(MPAMCFG_PART_SEL, PARTID_SEL, 0, 16)
     FIELD(MPAMCFG_PART_SEL, INTERNAL, 16, 1)
@@ -458,6 +466,33 @@ static void mpam_msc_update_err_irq(MPAMMSCState *s)
     bool active = FIELD_EX64(s->esr, MPAMF_ESR, ERR_CODE) != 0;
 
     qemu_set_irq(s->err_irq, int_en && active);
+}
+
+/*
+ * Record an error in MPAMF_ESR and raise the error interrupt if enabled.
+ * PARTID_MON also carries a selector value (e.g. MON_SEL) for the errors
+ * where Table 7-1 lists "MON_SEL and RIS" as the fields in effect.
+ */
+static void mpam_msc_inject_error(MPAMMSCState *s, uint32_t errcode,
+                                  uint16_t partid_mon, uint8_t pmg,
+                                  uint8_t ris)
+{
+    uint64_t esr = 0;
+
+    if (FIELD_EX64(s->esr, MPAMF_ESR, ERR_CODE)) {
+        esr = FIELD_DP64(esr, MPAMF_ESR, OVRWR, 1);
+    }
+    esr = FIELD_DP64(esr, MPAMF_ESR, PARID_MON, partid_mon);
+    esr = FIELD_DP64(esr, MPAMF_ESR, PMG, pmg);
+    esr = FIELD_DP64(esr, MPAMF_ESR, ERR_CODE, errcode);
+    esr = FIELD_DP64(esr, MPAMF_ESR, RIS, ris);
+    s->esr = esr;
+    mpam_msc_sync_esr_ecr(s);
+
+    qemu_log_mask(LOG_GUEST_ERROR,
+                  "MPAM: error 0x%x partid/mon %u pmg %u ris %u\n",
+                  errcode, partid_mon, pmg, ris);
+    mpam_msc_update_err_irq(s);
 }
 
 /*
@@ -1094,18 +1129,19 @@ static void mpam_msc_write_reg(void *opaque, hwaddr offset, uint64_t value,
                           "MPAM: Unexpected write to CFG_PART_SEL Mask=%x Value=%lx\n",
                           MPAMCFG_PART_SEL_WRITE_MASK, value);
         }
-        /* Field matches for all RIS */
-        if (!FIELD_EX64(mpamf->idr, MPAMF_IDR, HAS_RIS) &&
-            FIELD_EX32(value, MPAMCFG_PART_SEL, RIS) != 0) {
-            qemu_log_mask(LOG_UNIMP,
-                          "MPAM: Unexpected write of non 0 RIS on MSC with !HAS_RIS\n");
-            return;
-        }
-        if (FIELD_EX32(value, MPAMCFG_PART_SEL, RIS) >= s->num_ris) {
+        /*
+         * Field matches for all RIS. The range check subsumes the !HAS_RIS
+         * case: such an MSC implements only RIS 0, so any nonzero RIS is
+         * undefined (IHI 0099 Table 7-1: Undefined_RIS_PART_SEL).
+         */
+        if (ris >= s->num_ris) {
             qemu_log_mask(LOG_GUEST_ERROR,
                           "MPAM: RIS %d out of range (num-ris %d)\n",
-                          FIELD_EX32(value, MPAMCFG_PART_SEL, RIS),
-                          s->num_ris);
+                          ris, s->num_ris);
+            mpam_msc_inject_error(s, MPAM_ERRCODE_UNDEF_RIS_PART_SEL,
+                                  FIELD_EX32(value, MPAMCFG_PART_SEL,
+                                             PARTID_SEL),
+                                  0, ris);
             return;
         }
         {
@@ -1134,6 +1170,23 @@ static void mpam_msc_write_reg(void *opaque, hwaddr offset, uint64_t value,
         if (!FIELD_EX32(mpamf->idr, MPAMF_IDR, HAS_PARTID_NRW)) {
             qemu_log_mask(LOG_UNIMP,
                           "MPAM: Unexpected write to INTPARTID when !HAS_PARTID_NRW\n");
+            return;
+        }
+        /*
+         * Table 7-1: writing INTERNAL as zero, or an out-of-range
+         * intPARTID, raises intPARTID_Range and is not written.
+         */
+        if (!FIELD_EX32(value, MPAMF_MPAMCFG_INTPARTID, INTERNAL) ||
+            FIELD_EX32(value, MPAMF_MPAMCFG_INTPARTID, INTPARTID) >=
+                s->num_int_partid) {
+            qemu_log_mask(LOG_GUEST_ERROR,
+                          "MPAM: INTPARTID write invalid (value %x, max %d)\n",
+                          FIELD_EX32(value, MPAMF_MPAMCFG_INTPARTID, INTPARTID),
+                          s->num_int_partid - 1);
+            mpam_msc_inject_error(s, MPAM_ERRCODE_INTPARTID_RANGE,
+                                  FIELD_EX32(value, MPAMF_MPAMCFG_INTPARTID,
+                                             INTPARTID),
+                                  0, s->ris);
             return;
         }
 
@@ -1363,10 +1416,61 @@ static void mpam_msc_write_reg(void *opaque, hwaddr offset, uint64_t value,
         return;
     }
     case A_MSMON_CFG_MON_SEL:
+    {
+        uint32_t mon = FIELD_EX32(value, MSMON_CFG_MON_SEL, MON_SEL);
+        uint32_t ris = FIELD_EX32(value, MSMON_CFG_MON_SEL, RIS);
+        uint32_t num_mon = MAX(s->num_csu_mon, s->num_mbwu_mon);
+
+        if (!FIELD_EX32(mpamf->idr, MPAMF_IDR, HAS_MSMON)) {
+            qemu_log_mask(LOG_UNIMP,
+                          "MPAM: Unexpected write to MON_SEL with no MSMON\n");
+            return;
+        }
+
+        /*
+         * Check-and-reject (IHI 0099 7.2.9): RIS selects a nonexistent
+         * resource instance or MON_SEL exceeds every monitor type this
+         * MSC implements.
+         */
+        if (ris >= s->num_ris) {
+            qemu_log_mask(LOG_GUEST_ERROR,
+                          "MPAM: MON_SEL RIS %d out of range (num-ris %d)\n",
+                          ris, s->num_ris);
+            mpam_msc_inject_error(s, MPAM_ERRCODE_UNDEF_RIS_MON_SEL,
+                                  mon, 0, ris);
+            return;
+        }
+        if (mon >= num_mon) {
+            qemu_log_mask(LOG_GUEST_ERROR,
+                          "MPAM: MON_SEL %d out of range (max %d)\n",
+                          mon, num_mon - 1);
+            mpam_msc_inject_error(s, MPAM_ERRCODE_MONITOR_RANGE,
+                                  mon, 0, ris);
+            return;
+        }
         s->mon_sel = value & (R_MSMON_CFG_MON_SEL_MON_SEL_MASK |
                               R_MSMON_CFG_MON_SEL_RIS_MASK);
         return;
+    }
     case A_MSMON_CFG_MBWU_FLT:
+    {
+        uint32_t partid = FIELD_EX32(value, MSMON_CFG_MBWU_FLT, PARTID);
+
+        if (!mpam_has_mbwu_mon(mpamf)) {
+            qemu_log_mask(LOG_UNIMP,
+                          "MPAM: Unexpected write to MBWU_FLT with no MBWU monitor\n");
+            return;
+        }
+        if (partid >= s->num_partid) {
+            qemu_log_mask(LOG_GUEST_ERROR,
+                          "MPAM: MBWU_FLT PARTID %d out of range\n", partid);
+            mpam_msc_inject_error(s, MPAM_ERRCODE_MSMONCFG_ID_RANGE,
+                                  partid,
+                                  FIELD_EX32(value, MSMON_CFG_MBWU_FLT, PMG),
+                                  FIELD_EX32(s->mon_sel, MSMON_CFG_MON_SEL,
+                                             RIS));
+            return;
+        }
         {
             uint32_t mask = R_MSMON_CFG_MBWU_FLT_PARTID_MASK |
                             R_MSMON_CFG_MBWU_FLT_PMG_MASK;
@@ -1378,6 +1482,7 @@ static void mpam_msc_write_reg(void *opaque, hwaddr offset, uint64_t value,
             mpam_mbwu_mon(s, mpam_mon_ris(s))->flt = value & mask;
         }
         return;
+    }
     case A_MSMON_CFG_MBWU_CTL:
     {
         MpamMbwuMon *m;
@@ -1422,11 +1527,30 @@ static void mpam_msc_write_reg(void *opaque, hwaddr offset, uint64_t value,
         return;
     }
     case A_MSMON_CFG_CSU_FLT:
+    {
+        uint32_t partid = FIELD_EX32(value, MSMON_CFG_CSU_FLT, PARTID);
+
+        if (!mpam_has_csu_mon(mpamf)) {
+            qemu_log_mask(LOG_UNIMP,
+                          "MPAM: Unexpected write to CSU_FLT with no CSU monitor\n");
+            return;
+        }
+        if (partid >= s->num_partid) {
+            qemu_log_mask(LOG_GUEST_ERROR,
+                          "MPAM: CSU_FLT PARTID %d out of range\n", partid);
+            mpam_msc_inject_error(s, MPAM_ERRCODE_MSMONCFG_ID_RANGE,
+                                  partid,
+                                  FIELD_EX32(value, MSMON_CFG_CSU_FLT, PMG),
+                                  FIELD_EX32(s->mon_sel, MSMON_CFG_MON_SEL,
+                                             RIS));
+            return;
+        }
         mpam_csu_mon(s, mpam_mon_ris(s))->flt =
             value & (R_MSMON_CFG_CSU_FLT_PARTID_MASK |
                      R_MSMON_CFG_CSU_FLT_PMG_MASK |
                      R_MSMON_CFG_CSU_FLT_XCL_MASK);
         return;
+    }
     case A_MSMON_CFG_CSU_CTL:
         if (!mpam_has_csu_mon(mpamf)) {
             qemu_log_mask(LOG_UNIMP,
@@ -1519,8 +1643,10 @@ static const MemoryRegionOps mpam_msc_ops = {
     },
 };
 
+
 /*
- * Power-on state of the MSC, shared between realize and reset.
+ * Power-on state of the MSC, shared between realize and reset: ID narrowing
+ * map identity-wrapped, partition config at reset values, monitors off.
  */
 static void mpam_msc_state_init(MPAMMSCState *s)
 {
@@ -1533,7 +1659,6 @@ static void mpam_msc_state_init(MPAMMSCState *s)
 
     for (int i = 0; i < s->num_ris; i++) {
         Mpamf *mpamf = &s->mpamf[i];
-
         mpamf->ecr = 0;
         mpamf->esr = 0;
         memset(mpamf->per_nrw_id, 0,
@@ -1543,6 +1668,7 @@ static void mpam_msc_state_init(MPAMMSCState *s)
         memset(mpamf->mbwu_mons, 0,
                sizeof(MpamMbwuMon) * s->num_mbwu_mon);
         memset(mpamf->csu_mons, 0, sizeof(MpamCsuMon) * s->num_csu_mon);
+
         /*
          * t0 is a virtual-clock timestamp; zero is a valid value (the
          * clock starts at zero), so initialise it explicitly rather than
@@ -1560,8 +1686,10 @@ static void mpam_msc_state_init(MPAMMSCState *s)
             mpamf->cfg_intpartid[p] = p % s->num_int_partid;
         }
         /*
-         * per_nrw_id is indexed by INTERNAL PARTID: it has num_int_partid
-         * entries, not num_partid.
+         * per_nrw_id is indexed by INTERNAL PARTID: it has
+         * num_int_partid entries, not num_partid.  Writing it with the
+         * request-PARTID count overflowed the allocation by 224 entries
+         * (malloc(): corrupted top size once the struct grew).
          */
         for (int p = 0; p < s->num_int_partid; p++) {
             /* MBW_MAX resets to full bandwidth on real hardware */
@@ -1625,7 +1753,6 @@ static bool mpam_msc_realize(DeviceState *dev, Error **errp)
         s->mpamf[i].num_csu_mon_vm = s->num_csu_mon;
         s->mpamf[i].csu_mons = g_new0(MpamCsuMon, s->num_csu_mon);
     }
-
     mpam_msc_state_init(s);
 
     memory_region_init_io(&s->mr, OBJECT(s), &mpam_msc_ops, s, "mpam_msc",

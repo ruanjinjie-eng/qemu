@@ -366,6 +366,14 @@ typedef struct MPAMMSCState {
     uint64_t csu_capacity;
 
     /*
+     * MPAMF_ECR / MPAMF_ESR are single per-MSC registers (IHI 0099 4.3),
+     * independent of the RIS selection.  The 64-bit ESR records the RIS
+     * the error was detected against in its top half.
+     */
+    uint32_t ecr;
+    uint64_t esr;
+
+    /*
      * Wired-interrupt GSIVs the board assigned (INTID = SPI + 32).  Zero
      * means "no wired interrupt"; the ACPI MPAM table reports them as-is.
      */
@@ -421,6 +429,18 @@ static uint32_t mpam_nrw_id_for(MPAMMSCState *s, Mpamf *mf, uint32_t partid)
 
     intpartid = mf->cfg_intpartid[partid % s->num_partid];
     return intpartid % s->num_int_partid;
+}
+
+/*
+ * Keep the per-RIS copies in Mpamf (exported through the QMP/PPTT path)
+ * in sync with the MSC-level ECR/ESR view the MMIO handlers use.
+ */
+static void mpam_msc_sync_esr_ecr(MPAMMSCState *s)
+{
+    for (int i = 0; i < s->num_ris; i++) {
+        s->mpamf[i].ecr = s->ecr;
+        s->mpamf[i].esr = (uint32_t)s->esr;
+    }
 }
 
 static Mpamf *mpam_mon_ris(MPAMMSCState *s)
@@ -673,6 +693,8 @@ static const VMStateDescription vmstate_mpam_msc = {
         VMSTATE_UINT16(part_sel, MPAMMSCState),
         VMSTATE_BOOL(internal_part_sel, MPAMMSCState),
         VMSTATE_UINT32(mon_sel, MPAMMSCState),
+        VMSTATE_UINT32(ecr, MPAMMSCState),
+        VMSTATE_UINT64(esr, MPAMMSCState),
         VMSTATE_STRUCT_VARRAY_POINTER_UINT32(mpamf, MPAMMSCState,
                                              num_ris_vm,
                                              vmstate_mpamf, Mpamf),
@@ -889,9 +911,27 @@ static uint64_t mpam_msc_read_reg(void *opaque, hwaddr offset,
     case A_MPAMF_ERR_MSI_ATTR:
         return mpamf->err_msi_attr;
     case A_MPAMF_ECR:
-        return mpamf->ecr;
+        if (!FIELD_EX64(mpamf->idr, MPAMF_IDR, HAS_ESR)) {
+            qemu_log_mask(LOG_UNIMP,
+                          "MPAM: Unexpected read of ECR with no ESR support\n");
+            return 0;
+        }
+        return s->ecr;
     case A_MPAMF_ESR:
-        return mpamf->esr;
+        if (!FIELD_EX64(mpamf->idr, MPAMF_IDR, HAS_ESR)) {
+            qemu_log_mask(LOG_UNIMP,
+                          "MPAM: Unexpected read of ESR with no ESR support\n");
+            return 0;
+        }
+        return s->esr;
+    case A_MPAMF_ESR + 0x4:
+        if (!FIELD_EX64(mpamf->idr, MPAMF_IDR, HAS_ESR) ||
+            !FIELD_EX64(mpamf->idr, MPAMF_IDR, HAS_EXTD_ESR)) {
+            qemu_log_mask(LOG_UNIMP,
+                          "MPAM: Unexpected read of extended ESR\n");
+            return 0;
+        }
+        return s->esr >> 32;
     case A_MPAMCFG_PART_SEL:
         return mpamf->cfg_part_sel;
     case A_MPAMF_MPAMCFG_INTPARTID: {
@@ -1371,12 +1411,43 @@ static void mpam_msc_write_reg(void *opaque, hwaddr offset, uint64_t value,
                       offset);
         return;
     case A_MPAMF_ECR:
+        if (!FIELD_EX64(mpamf->idr, MPAMF_IDR, HAS_ESR)) {
+            qemu_log_mask(LOG_UNIMP,
+                          "MPAM: Unexpected write to ECR with no ESR support\n");
+            return;
+        }
         if (value & ~MPAMF_ECR_WRITE_MASK) {
             qemu_log_mask(LOG_UNIMP,
                           "MPAM: Unexpected write to ECR Mask=%x Value=%lx\n",
                           MPAMF_ECR_WRITE_MASK, value);
         }
-        mpamf->ecr = value;
+        s->ecr = value & MPAMF_ECR_WRITE_MASK;
+        mpam_msc_sync_esr_ecr(s);
+        return;
+    case A_MPAMF_ESR:
+        /*
+         * Software clears an error by writing ERRCODE as zero; writing a
+         * non-zero ERRCODE activates the level error interrupt (8.2).
+         * Bits [30:28] are reserved.
+         */
+        if (!FIELD_EX64(mpamf->idr, MPAMF_IDR, HAS_ESR)) {
+            qemu_log_mask(LOG_UNIMP,
+                          "MPAM: Unexpected write to ESR with no ESR support\n");
+            return;
+        }
+        s->esr = deposit64(s->esr, 0, 32, value & ~0x70000000u);
+        mpam_msc_sync_esr_ecr(s);
+        return;
+    case A_MPAMF_ESR + 0x4:
+        if (!FIELD_EX64(mpamf->idr, MPAMF_IDR, HAS_ESR) ||
+            !FIELD_EX64(mpamf->idr, MPAMF_IDR, HAS_EXTD_ESR)) {
+            qemu_log_mask(LOG_UNIMP,
+                          "MPAM: Unexpected write to extended ESR\n");
+            return;
+        }
+        /* Bits [63:36] are reserved; [35:32] hold RIS. */
+        s->esr = deposit64(s->esr, 32, 32, value & ~0xfffffff0u);
+        mpam_msc_sync_esr_ecr(s);
         return;
     default:
         qemu_log_mask(LOG_UNIMP,

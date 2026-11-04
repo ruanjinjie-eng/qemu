@@ -471,6 +471,13 @@ static uint64_t mpam_msc_read_reg(void *opaque, hwaddr offset,
         return mpamf->cpor_idr;
     case A_MPAMF_MBW_IDR:
         return mpamf->mbw_idr;
+    case A_MPAMF_PRI_IDR:
+        if (!FIELD_EX32(mpamf->idr, MPAMF_IDR, HAS_PRI_PART)) {
+            qemu_log_mask(LOG_UNIMP,
+                "MPAM: Unexpected read of PRI_IDR with no PRI PART support\n");
+            return 0;
+        }
+        return mpamf->pri_idr;
     case A_MPAMF_PARTID_NRW_IDR: {
         return mpamf->partid_nrw_idr;
     }
@@ -511,6 +518,13 @@ static uint64_t mpam_msc_read_reg(void *opaque, hwaddr offset,
             return 0;
         }
         return mpamf->per_nrw_id[nrw_part_sel].cfg_mbw_max;
+    case A_MPAMF_MPAMCFG_PRI:
+        if (!FIELD_EX32(mpamf->idr, MPAMF_IDR, HAS_PRI_PART)) {
+            qemu_log_mask(LOG_UNIMP,
+                "MPAM: Unexpected read of CFG_PRI with no PRI PART support\n");
+            return 0;
+        }
+        return mpamf->per_nrw_id[nrw_part_sel].cfg_pri;
     case A_MPAMF_MPAMCFG_MBW_PROP:
         if (!FIELD_EX32(mpamf->idr, MPAMF_IDR, HAS_MBW_PART) ||
             !FIELD_EX32(mpamf->mbw_idr, MPAMF_MBW_IDR, HAS_PROP)) {
@@ -628,6 +642,40 @@ static void mpam_msc_write_reg(void *opaque, hwaddr offset, uint64_t value,
                           valid, value);
         }
         mpamf->per_nrw_id[nrw_part_sel].cfg_mbw_max = value & valid;
+        return;
+    }
+    case A_MPAMF_MPAMCFG_PRI:
+    {
+        uint32_t valid = 0;
+
+        if (!FIELD_EX32(mpamf->idr, MPAMF_IDR, HAS_PRI_PART)) {
+            qemu_log_mask(LOG_UNIMP,
+                          "MPAM: Unexpected write to CFG_PRI when !HAS_PRI_PART\n");
+            return;
+        }
+        /*
+         * IHI 0099 9.6 MPAMCFG_PRI: INTPRI and DSPRI use their
+         * least-significant *pri_wd bits, unlike the fraction fields.
+         */
+        if (FIELD_EX32(mpamf->pri_idr, MPAMF_PRI_IDR, HAS_INTPRI)) {
+            uint32_t wd = FIELD_EX32(mpamf->pri_idr, MPAMF_PRI_IDR,
+                                     INTPRI_WD);
+
+            valid |= wd >= 16 ? 0xffffu : ((1u << wd) - 1);
+        }
+        if (FIELD_EX32(mpamf->pri_idr, MPAMF_PRI_IDR, HAS_DSPRI)) {
+            uint32_t wd = FIELD_EX32(mpamf->pri_idr, MPAMF_PRI_IDR,
+                                     DSPRI_WD);
+            uint32_t mask = wd >= 16 ? 0xffffu : ((1u << wd) - 1);
+
+            valid |= mask << 16;
+        }
+        if (value & ~valid) {
+            qemu_log_mask(LOG_UNIMP,
+                          "MPAM: Unexpected write to CFG_PRI Mask=%x Value=%lx\n",
+                          valid, value);
+        }
+        mpamf->per_nrw_id[nrw_part_sel].cfg_pri = value & valid;
         return;
     }
     case A_MPAMF_MPAMCFG_MBW_PROP:
@@ -827,6 +875,17 @@ static void mpam_msc_mem_realize(DeviceState *dev, Error **errp)
         mpamf->idr = FIELD_DP64(mpamf->idr, MPAMF_IDR, NO_IMPL_MSMON, 1);
         /* Memory specific bit */
         mpamf->idr = FIELD_DP64(mpamf->idr, MPAMF_IDR, HAS_MBW_PART, 1);
+        /*
+         * Priority partitioning on the memory side too: advertise
+         * HAS_PRI_PART and the same PRI_IDR view as the cache subtype.
+         */
+        mpamf->idr = FIELD_DP64(mpamf->idr, MPAMF_IDR, HAS_PRI_PART, 1);
+        mpamf->pri_idr = FIELD_DP32(mpamf->pri_idr, MPAMF_PRI_IDR,
+                                    HAS_INTPRI, 1);
+        mpamf->pri_idr = FIELD_DP32(mpamf->pri_idr, MPAMF_PRI_IDR,
+                                    INTPRI_0_IS_LOW, 1);
+        mpamf->pri_idr = FIELD_DP32(mpamf->pri_idr, MPAMF_PRI_IDR,
+                                    INTPRI_WD, 2);
 
         mpamf->iidr = FIELD_DP64(mpamf->iidr, MPAMF_IIDR, IMPLEMENTER,
                                  MPAM_IIDR_IMPLEMENTER);
@@ -889,6 +948,7 @@ static void mpam_msc_cache_realize(DeviceState *dev, Error **errp)
 
         /* Cache specific bit */
         mpamf->idr = FIELD_DP64(mpamf->idr, MPAMF_IDR, HAS_CPOR_PART, 1);
+        mpamf->idr = FIELD_DP64(mpamf->idr, MPAMF_IDR, HAS_PRI_PART, 1);
         mpamf->idr = FIELD_DP64(mpamf->idr, MPAMF_IDR, HAS_PARTID_NRW,
                                 s->num_int_partid < s->num_partid);
 
@@ -904,6 +964,14 @@ static void mpam_msc_cache_realize(DeviceState *dev, Error **errp)
         /* Portion */
         mpamf->cpor_idr = FIELD_DP32(mpamf->cpor_idr, MPAMF_CPOR_IDR, CPBM_WD,
                                      MPAM_CACHE_PART);
+
+        /* Priority */
+        mpamf->pri_idr = FIELD_DP32(mpamf->pri_idr, MPAMF_PRI_IDR,
+                                    HAS_INTPRI, 1);
+        mpamf->pri_idr = FIELD_DP32(mpamf->pri_idr, MPAMF_PRI_IDR,
+                                    INTPRI_0_IS_LOW, 1);
+        mpamf->pri_idr = FIELD_DP32(mpamf->pri_idr, MPAMF_PRI_IDR,
+                                    INTPRI_WD, 2);
 
         if (s->num_int_partid < s->num_partid) {
             mpamf->partid_nrw_idr = FIELD_DP32(mpamf->partid_nrw_idr,

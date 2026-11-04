@@ -229,6 +229,16 @@ REG32(MPAMF_MPAMCFG_MBW_PBM0, 0x2000)
 /* Implementer 0 is reserved for software; product ID 'Q'. */
 #define MPAM_IIDR_IMPLEMENTER 0
 
+typedef struct MpamfPerNrwId {
+        uint32_t cfg_cpbm[(MPAM_CACHE_PART + 31) / 32];
+        uint32_t cfg_mbw_pbm[(MPAM_MBW_PART + 31) / 32];
+        uint32_t cfg_pri;
+        uint32_t cfg_cmax;
+        uint32_t cfg_mbw_min;
+        uint32_t cfg_mbw_max;
+        uint32_t cfg_mbw_prop;
+} MpamfPerNrwId;
+
 typedef struct Mpamf {
     uint64_t idr;
     uint32_t iidr;
@@ -250,6 +260,10 @@ typedef struct Mpamf {
     uint32_t ecr;
     uint32_t esr;
     uint32_t cfg_part_sel;
+    uint32_t *cfg_intpartid;
+
+    MpamfPerNrwId *per_nrw_id;
+
     /* Array sizes for migration (derived from the MSC properties). */
     uint32_t num_partid_vm;
     uint32_t num_int_partid_vm;
@@ -273,6 +287,27 @@ typedef struct MPAMMSCState {
     uint32_t num_ris_vm;
 
 } MPAMMSCState;
+
+/*
+ * ID narrowing may be in effect.  If it is there is an indirection
+ * table per RIS mapping from part_sel to the internal ID. To make things
+ * more complex, the Partition selection register can directly address
+ * internal IDs. That works for everything other than the ID map itself.
+ * This function pulls the right internal ID out of this complexity
+ * for use in accessing the per_nrw_id structures.
+ */
+static uint32_t mpam_get_nrw_id(MPAMMSCState *s)
+{
+    Mpamf *mpamf = &s->mpamf[s->ris];
+
+    if (!FIELD_EX32(mpamf->idr, MPAMF_IDR, HAS_PARTID_NRW)) {
+        return s->part_sel;
+    }
+    if (s->internal_part_sel) {
+        return s->part_sel;
+    }
+    return mpamf->cfg_intpartid[s->part_sel];
+}
 
 typedef struct MPAMMSCMemState {
     MPAMMSCState parent;
@@ -300,6 +335,24 @@ static bool mpam_has_mbwu_mon(Mpamf *mf)
            FIELD_EX32(mf->msmon_idr, MPAMF_MSMON_IDR, MSMON_MBWU);
 }
 
+static const VMStateDescription vmstate_mpamf_per_nrw_id = {
+    .name = "mpam/per-nrw-id",
+    .version_id = 1,
+    .minimum_version_id = 1,
+    .fields = (const VMStateField[]) {
+        VMSTATE_UINT32_ARRAY(cfg_cpbm, MpamfPerNrwId,
+                             (MPAM_CACHE_PART + 31) / 32),
+        VMSTATE_UINT32_ARRAY(cfg_mbw_pbm, MpamfPerNrwId,
+                             (MPAM_MBW_PART + 31) / 32),
+        VMSTATE_UINT32(cfg_pri, MpamfPerNrwId),
+        VMSTATE_UINT32(cfg_cmax, MpamfPerNrwId),
+        VMSTATE_UINT32(cfg_mbw_min, MpamfPerNrwId),
+        VMSTATE_UINT32(cfg_mbw_max, MpamfPerNrwId),
+        VMSTATE_UINT32(cfg_mbw_prop, MpamfPerNrwId),
+        VMSTATE_END_OF_LIST()
+    },
+};
+
 static const VMStateDescription vmstate_mpamf = {
     .name = "mpam/mpamf",
     .version_id = 1,
@@ -325,6 +378,12 @@ static const VMStateDescription vmstate_mpamf = {
         VMSTATE_UINT32(ecr, Mpamf),
         VMSTATE_UINT32(esr, Mpamf),
         VMSTATE_UINT32(cfg_part_sel, Mpamf),
+        VMSTATE_VARRAY_UINT32(cfg_intpartid, Mpamf, num_partid_vm, 0,
+                              vmstate_info_uint32, uint32_t),
+        VMSTATE_STRUCT_VARRAY_POINTER_UINT32(per_nrw_id, Mpamf,
+                                             num_int_partid_vm,
+                                             vmstate_mpamf_per_nrw_id,
+                                             MpamfPerNrwId),
         VMSTATE_END_OF_LIST()
     },
 };
@@ -354,6 +413,7 @@ static uint64_t mpam_msc_read_reg(void *opaque, hwaddr offset,
 {
     MPAMMSCState *s = MPAM_MSC_DEVICE(opaque);
     Mpamf *mpamf = &s->mpamf[s->ris];
+    uint32_t nrw_part_sel = mpam_get_nrw_id(s);
 
     switch (offset) {
     case A_MPAMF_IDR:
@@ -425,6 +485,7 @@ static void mpam_msc_write_reg(void *opaque, hwaddr offset, uint64_t value,
 {
     MPAMMSCState *s = MPAM_MSC_DEVICE(opaque);
     Mpamf *mpamf = &s->mpamf[s->ris];
+    uint32_t nrw_part_sel = mpam_get_nrw_id(s);
 
     switch (offset) {
     case A_MPAMCFG_PART_SEL: {
@@ -485,6 +546,15 @@ static void mpam_msc_state_init(MPAMMSCState *s)
     s->ris = 0;
     s->part_sel = 0;
     s->internal_part_sel = false;
+
+    for (int i = 0; i < s->num_ris; i++) {
+        Mpamf *mpamf = &s->mpamf[i];
+
+        memset(mpamf->per_nrw_id, 0,
+               sizeof(MpamfPerNrwId) * s->num_int_partid);
+        memset(mpamf->cfg_intpartid, 0,
+               sizeof(uint32_t) * s->num_partid);
+    }
 }
 
 static void mpam_msc_reset(DeviceState *dev)
@@ -497,7 +567,6 @@ static void mpam_msc_reset(DeviceState *dev)
 static bool mpam_msc_realize(DeviceState *dev, Error **errp)
 {
     MPAMMSCState *s = MPAM_MSC_DEVICE(dev);
-
     /* IHI 0099: MPAMCFG_PART_SEL.RIS is 4 bits, so at most 16 RIS. */
     if (s->num_ris < 1 || s->num_ris > 16) {
         error_setg(errp, "num-ris must be in the range 1..16");
@@ -518,6 +587,13 @@ static bool mpam_msc_realize(DeviceState *dev, Error **errp)
 
     s->num_ris_vm = s->num_ris;
     s->mpamf = g_new0(Mpamf, s->num_ris);
+    for (int i = 0; i < s->num_ris; i++) {
+        s->mpamf[i].num_partid_vm = s->num_partid;
+        s->mpamf[i].num_int_partid_vm = s->num_int_partid;
+        s->mpamf[i].per_nrw_id = g_new0(MpamfPerNrwId, s->num_int_partid);
+        s->mpamf[i].cfg_intpartid = g_new0(uint32_t, s->num_partid);
+    }
+
     mpam_msc_state_init(s);
 
     memory_region_init_io(&s->mr, OBJECT(s), &mpam_msc_ops, s, "mpam_msc",

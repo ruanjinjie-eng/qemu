@@ -1140,6 +1140,16 @@ F: tests/functional/aarch64/test_tuxrun.py
 F: tests/functional/arm/test_tuxrun.py
 F: tests/functional/arm/test_virt.py
 
+Arm MPAM emulation
+M: Jinjie Ruan <ruanjinjie@huawei.com>
+L: qemu-arm@nongnu.org
+S: Maintained
+F: hw/arm/mpam.c
+F: hw/arm/mpam-qapi.c
+F: include/hw/arm/mpam.h
+F: qapi/mpam.json
+F: stubs/qmp-arm-mpam.c
+
 Xilinx Zynq
 M: Edgar E. Iglesias <edgar.iglesias@gmail.com>
 M: Alistair Francis <alistair@alistair23.me>

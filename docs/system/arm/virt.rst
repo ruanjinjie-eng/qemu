@@ -120,6 +120,16 @@ mte
   Set ``on``/``off`` to enable/disable emulating a guest CPU which implements the
   Arm Memory Tagging Extensions. The default is ``off``.
 
+mpam
+  Set ``on``/``off`` to enable/disable the Arm Memory System Resource
+  Partitioning and Monitoring (MPAM) emulation. The default is ``off``.
+  Enabling MPAM adds a set of memory-system components (MSCs) to the machine
+  and describes them in the ACPI MPAM table, so it is only usable with ACPI
+  firmware; a device-tree boot does not describe them. If no ``-smp-cache``
+  topology is given, a default cache topology of per-core L1 and L2 (L2 at
+  cluster level when the machine has more than one cluster) and per-socket L3
+  is assumed so that the MPAM table's cache identifiers match the PPTT.
+
 highmem
   Set ``on``/``off`` to enable/disable placing devices and RAM in physical
   address space above 32 bits. The default is ``on`` for machine types

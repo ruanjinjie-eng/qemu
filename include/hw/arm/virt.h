@@ -177,6 +177,7 @@ struct VirtMachineState {
     bool ras;
     bool mte;
     bool dtb_randomness;
+    bool mpam;
     bool second_ns_uart_present;
     OnOffAuto acpi;
     VirtGICType gic_version;

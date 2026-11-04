@@ -374,6 +374,14 @@ typedef struct MPAMMSCState {
     uint64_t csu_capacity;
 
     /*
+     * Memory-side MSC whose bandwidth control limits the traffic counted
+     * by this MSC's MBWU monitors.  Cache MSCs generally implement no
+     * bandwidth control of their own, but what leaves the cache for
+     * memory is capped by the memory-side MSC.
+     */
+    DeviceState *bw_source;
+
+    /*
      * MPAMF_ECR / MPAMF_ESR are single per-MSC registers (IHI 0099 4.3),
      * independent of the RIS selection.  The 64-bit ESR records the RIS
      * the error was detected against in its top half.
@@ -551,6 +559,8 @@ static MpamMbwuMon *mpam_mbwu_mon(MPAMMSCState *s, Mpamf *mf)
  * the filter selects, so monitor readings track the configured
  * bandwidth control.
  */
+DECLARE_INSTANCE_CHECKER(MPAMMSCState, MPAM_MSC_DEVICE, TYPE_MPAM_MSC);
+
 static uint64_t mpam_mbwu_value(MPAMMSCState *s, Mpamf *mf, MpamMbwuMon *m)
 {
     uint64_t v = m->base;
@@ -568,21 +578,60 @@ static uint64_t mpam_mbwu_value(MPAMMSCState *s, Mpamf *mf, MpamMbwuMon *m)
         if (FIELD_EX32(m->ctl, MSMON_CFG_MBWU_CTL, MATCH_PARTID)) {
             uint32_t partid = FIELD_EX32(m->flt, MSMON_CFG_MBWU_FLT,
                                          PARTID);
-            uint32_t nrw = mpam_nrw_id_for(s, mf, partid);
-            MpamfPerNrwId *cfg = &mf->per_nrw_id[nrw];
+            MPAMMSCState *cs = s;
+            Mpamf *cmf = mf;
+            MpamfPerNrwId *cfg;
             uint64_t frac_num, frac_den;
+            uint32_t nrw;
+
+            /*
+             * A memory-side MSC caps the traffic the L3 cache sends to
+             * memory, but the cache MSC may implement no bandwidth
+             * control of its own.  In that case follow the bandwidth
+             * control of the linked memory-side MSC.
+             */
+            if (!FIELD_EX32(mf->idr, MPAMF_IDR, HAS_MBW_PART) &&
+                s->bw_source) {
+                cs = MPAM_MSC_DEVICE(s->bw_source);
+                cmf = &cs->mpamf[0];
+            }
+
+            /*
+             * The board gives both MSCs the same PARTID geometry, so the
+             * filter PARTID resolves through the memory-side map too.
+             */
+            nrw = mpam_nrw_id_for(cs, cmf, partid);
+            cfg = &cmf->per_nrw_id[nrw];
 
             /*
              * The configured bandwidth comes from either MBW_MAX or,
              * on classes that advertise MBW_PBM, the PBM bitmap
              * (popcount of the programmed bits over its width).
+             *
+             * Both can be programmed at the same time: the portion
+             * bitmap grants bandwidth and MBW_MAX caps it.  Software
+             * that uses only one leaves the other at full bandwidth, so
+             * use the more restrictive of the two.
              */
             if (cfg->cfg_mbw_pbm[0]) {
                 frac_num = __builtin_popcount(cfg->cfg_mbw_pbm[0] &
                                      ((1u << MPAM_MBW_PART) - 1));
                 frac_den = MPAM_MBW_PART;
             } else {
-                /* MBW_MAX is a 16-bit fraction; 0xffff = full bandwidth. */
+                frac_num = 0xffff;
+                frac_den = 0xffff;
+            }
+
+            /*
+             * MBW_MAX is a 16-bit fraction; 0xffff = full bandwidth.
+             * A soft limit (HARDLIM == 0) only constrains allocation
+             * when the resource is contended, which this model does not
+             * simulate, so it does not throttle the monitored rate.
+             */
+            if (FIELD_EX32(cfg->cfg_mbw_max, MPAMF_MPAMCFG_MBW_MAX,
+                           HARDLIM) &&
+                (cfg->cfg_mbw_max & 0xffff) * frac_den <
+                frac_num * 0xffff) {
                 frac_num = cfg->cfg_mbw_max & 0xffff;
                 frac_den = 0xffff;
             }
@@ -647,8 +696,6 @@ typedef struct MPAMMSCCacheState {
     uint16_t cpu;
 
 } MPAMMSCCacheState;
-
-DECLARE_INSTANCE_CHECKER(MPAMMSCState, MPAM_MSC_DEVICE, TYPE_MPAM_MSC);
 
 /*
  * IHI 0099 9.4: a width-reported fraction field occupies the most
@@ -1955,6 +2002,8 @@ static const Property mpam_msc_props[] = {
     DEFINE_PROP_UINT32("num-mbwu-mon", MPAMMSCState, num_mbwu_mon, 8),
     DEFINE_PROP_UINT64("bw-nominal-bps", MPAMMSCState, bw_nominal_bps,
                        10000000000ULL),  /* 10 GB/s default bandwidth */
+    DEFINE_PROP_LINK("bw-source", MPAMMSCState, bw_source,
+                     TYPE_MPAM_MSC, DeviceState *),
     DEFINE_PROP_UINT32("num-csu-mon", MPAMMSCState, num_csu_mon, 4),
     DEFINE_PROP_UINT64("csu-capacity-bytes", MPAMMSCState, csu_capacity,
                        32 * MiB),

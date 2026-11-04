@@ -501,6 +501,14 @@ void build_srat_acpi_generic_port(GArray *table_data, uint32_t node,
 void build_slit(GArray *table_data, BIOSLinker *linker, MachineState *ms,
                 const char *oem_id, const char *oem_table_id);
 
+/*
+ * PPTT rev 3 Cache ID (ACPI 6.5 Table 5.157): cache type and level in
+ * the high bytes, the first CPU of the topology container in the low
+ * half.  The MPAM table cache locator uses the same encoding.
+ */
+#define PPTT_CACHE_ID(type, level, cpu)                          \
+    (((uint32_t)(type) << 24) | ((uint32_t)(level) << 16) | (cpu))
+
 void build_pptt(GArray *table_data, BIOSLinker *linker, MachineState *ms,
                 const char *oem_id, const char *oem_table_id,
                 int num_caches, CPUCoreCaches *caches);

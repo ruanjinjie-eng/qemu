@@ -2185,16 +2185,16 @@ void build_spcr(GArray *table_data, BIOSLinker *linker,
  * 5.2.29.2 Cache Type Structure (Type 1)
  */
 static void build_cache_nodes(GArray *tbl, CPUCoreCaches *cache,
-                              uint32_t next_offset)
+                              uint32_t next_offset, uint32_t cache_id)
 {
-    const uint8_t node_length = 24;
+    const uint8_t node_length = 28;
     int start_len = tbl->len;
     int val;
 
     build_append_byte(tbl, 1);                         /* Type 1 - cache */
     build_append_byte(tbl, node_length);               /* Length */
     build_append_int_noprefix(tbl, 0, 2);              /* Reserved */
-    build_append_int_noprefix(tbl, 0x7f, 4);           /* Flags */
+    build_append_int_noprefix(tbl, 0xff, 4);           /* Flags */
     build_append_int_noprefix(tbl, next_offset, 4);    /* Next Level of Cache */
     build_append_int_noprefix(tbl, cache->size, 4);    /* Size */
     build_append_int_noprefix(tbl, cache->sets, 4);    /* Number of sets */
@@ -2213,6 +2213,7 @@ static void build_cache_nodes(GArray *tbl, CPUCoreCaches *cache,
     }
     build_append_byte(tbl, val);                        /* Attributes */
     build_append_int_noprefix(tbl, cache->linesize, 2); /* Line size */
+    build_append_int_noprefix(tbl, cache_id, 4);        /* Cache ID (v1) */
     g_assert(tbl->len == start_len + node_length);
 }
 
@@ -2230,7 +2231,8 @@ static bool build_caches(GArray *table_data, uint32_t pptt_start,
                          uint8_t level_high, /* Inclusive */
                          uint8_t level_low,  /* Inclusive */
                          uint32_t *data_offset,
-                         uint32_t *instr_offset)
+                         uint32_t *instr_offset,
+                         uint32_t base_cpu)
 {
     uint32_t next_level_offset_data = 0, next_level_offset_instruction = 0;
     uint32_t this_offset, next_offset = 0;
@@ -2240,9 +2242,19 @@ static bool build_caches(GArray *table_data, uint32_t pptt_start,
     /* Walk caches from top to bottom */
     for (level = level_high; level >= level_low; level--) {
         for (c = 0; c < num_caches; c++) {
+            uint32_t cache_id;
+
             if (caches[c].level != level) {
                 continue;
             }
+
+            /*
+             * MPAM cross-references caches from the MPAM table using
+             * this id. base_cpu identifies the topology container the
+             * cache belongs to (the id at which this call was made).
+             */
+            cache_id = PPTT_CACHE_ID(caches[c].type, caches[c].level,
+                                     base_cpu);
 
             /* Assume only unified above l1 for now */
             this_offset = table_data->len - pptt_start;
@@ -2258,7 +2270,7 @@ static bool build_caches(GArray *table_data, uint32_t pptt_start,
                 next_offset = next_level_offset_instruction;
                 break;
             }
-            build_cache_nodes(table_data, &caches[c], next_offset);
+            build_cache_nodes(table_data, &caches[c], next_offset, cache_id);
             switch (caches[c].type) {
             case INSTRUCTION_CACHE:
                 next_level_offset_instruction = this_offset;
@@ -2316,7 +2328,7 @@ void build_pptt(GArray *table_data, BIOSLinker *linker, MachineState *ms,
     uint32_t num_priv = 0;
     bool cache_at_topo_level;
 
-    AcpiTable table = { .sig = "PPTT", .rev = 2,
+    AcpiTable table = { .sig = "PPTT", .rev = 3,
                         .oem_id = oem_id, .oem_table_id = oem_table_id };
 
     acpi_table_begin(&table, table_data);
@@ -2353,7 +2365,7 @@ void build_pptt(GArray *table_data, BIOSLinker *linker, MachineState *ms,
             if (cache_at_topo_level) {
                 build_caches(table_data, pptt_start, num_caches, caches,
                              top_node, bottom_node, &node_data_offset,
-                             &node_instr_offset);
+                             &node_instr_offset, n);
                 priv_rsrc[0] = node_instr_offset;
                 priv_rsrc[1] = node_data_offset;
                 if (node_instr_offset || node_data_offset) {
@@ -2384,7 +2396,8 @@ void build_pptt(GArray *table_data, BIOSLinker *linker, MachineState *ms,
                 if (cache_at_topo_level) {
                     build_caches(table_data, pptt_start, num_caches, caches,
                                  top_cluster, bottom_cluster,
-                                 &cluster_data_offset, &cluster_instr_offset);
+                                 &cluster_data_offset, &cluster_instr_offset,
+                                 n);
                     priv_rsrc[0] = cluster_instr_offset;
                     priv_rsrc[1] = cluster_data_offset;
                     if (cluster_instr_offset || cluster_data_offset) {
@@ -2423,7 +2436,7 @@ void build_pptt(GArray *table_data, BIOSLinker *linker, MachineState *ms,
             if (cache_at_topo_level) {
                 build_caches(table_data, pptt_start, num_caches, caches,
                              top_core, bottom_core, &core_data_offset,
-                             &core_instr_offset);
+                             &core_instr_offset, n);
                 priv_rsrc[0] = core_instr_offset;
                 priv_rsrc[1] = core_data_offset;
                 num_priv = core_instr_offset == core_data_offset ? 1 : 2;

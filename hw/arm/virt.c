@@ -2185,7 +2185,8 @@ static void mpam_msc_mmio_map(VirtMachineState *vms, DeviceState *dev,
 }
 
 static void create_mpam_msc_cache(VirtMachineState *vms, int level,
-                                  hwaddr *base, int *next_spi)
+                                  hwaddr *base, int *next_spi,
+                                  DeviceState *bw_source)
 {
     MachineState *ms = MACHINE(vms);
     const CPUArchIdList *cpu_list = ms->possible_cpus;
@@ -2250,6 +2251,16 @@ static void create_mpam_msc_cache(VirtMachineState *vms, int level,
         /* Occupancy model: usage = capacity scaled by the CPBM fraction */
         object_property_set_uint(OBJECT(dev), "csu-capacity-bytes",
                                  csu_capacity, &error_fatal);
+        /*
+         * The L3 bandwidth monitors read the bandwidth that leaves the
+         * cache for memory, which the memory-side MSC caps.  A cache MSC
+         * has no bandwidth control of its own, so point it at the memory
+         * MSC when the topology has exactly one.
+         */
+        if (bw_source) {
+            object_property_set_link(OBJECT(dev), "bw-source",
+                                     OBJECT(bw_source), &error_fatal);
+        }
         sysbus_realize_and_unref(SYS_BUS_DEVICE(dev), &error_fatal);
         mpam_msc_mmio_map(vms, dev, *base);
         sysbus_connect_irq(SYS_BUS_DEVICE(dev), 0,
@@ -2263,8 +2274,9 @@ static void create_mpam_msc_cache(VirtMachineState *vms, int level,
 static void create_mpam_msc(VirtMachineState *vms, Error **errp)
 {
     MachineState *ms = MACHINE(vms);
-    DeviceState *dev;
+    DeviceState *dev, *mem_msc = NULL;
     int count = 0;
+    int mem_msc_count = 0;
     int next_spi = MPAM_SPI_BASE;
     hwaddr base = vms->memmap[VIRT_MPAM_MSC].base;
 
@@ -2291,6 +2303,8 @@ static void create_mpam_msc(VirtMachineState *vms, Error **errp)
                            qdev_get_gpio_in(vms->gic, err_spi));
         sysbus_connect_irq(SYS_BUS_DEVICE(dev), 1,
                            qdev_get_gpio_in(vms->gic, oflow_spi));
+        mem_msc = dev;
+        mem_msc_count = 1;
         base += MPAM_SIZE;
     } else {
         for (int i = 0; i < ms->numa_state->num_nodes; i++) {
@@ -2321,13 +2335,24 @@ static void create_mpam_msc(VirtMachineState *vms, Error **errp)
                                qdev_get_gpio_in(vms->gic, err_spi));
             sysbus_connect_irq(SYS_BUS_DEVICE(dev), 1,
                                qdev_get_gpio_in(vms->gic, oflow_spi));
+            mem_msc = dev;
+            mem_msc_count++;
             base += MPAM_SIZE;
             count++;
         }
     }
 
-    create_mpam_msc_cache(vms, 3, &base, &next_spi);
-    create_mpam_msc_cache(vms, 2, &base, &next_spi);
+    /*
+     * Only couple the cache monitors to a memory-side bandwidth control
+     * when there is a single memory MSC, so that the PARTID-to-RIS
+     * mapping is unambiguous.
+     */
+    if (mem_msc_count != 1) {
+        mem_msc = NULL;
+    }
+
+    create_mpam_msc_cache(vms, 3, &base, &next_spi, mem_msc);
+    create_mpam_msc_cache(vms, 2, &base, &next_spi, mem_msc);
 }
 
 static void create_pcie(VirtMachineState *vms)

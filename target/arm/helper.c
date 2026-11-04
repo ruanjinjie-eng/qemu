@@ -6608,6 +6608,35 @@ static CPAccessResult access_mpam0(CPUARMState *env,
     return CP_ACCESS_OK;
 }
 
+#define MPAMSM_EL1_VALID_MASK \
+    (R_MPAMSM_EL1_PARTID_D_MASK | R_MPAMSM_EL1_PMG_D_MASK)
+
+static void mpamsm_el1_write(CPUARMState *env, const ARMCPRegInfo *ri,
+                             uint64_t value)
+{
+    raw_write(env, ri, value & MPAMSM_EL1_VALID_MASK);
+}
+
+static CPAccessResult access_mpamsm(CPUARMState *env,
+                                    const ARMCPRegInfo *ri, bool isread)
+{
+    if (arm_current_el(env) < 2 && arm_is_el2_enabled(env) &&
+        !(env->mpam2_el2 & R_MPAM2_EL2_EnMPAMSM_MASK)) {
+        return CP_ACCESS_TRAP_EL2;
+    }
+    return CP_ACCESS_OK;
+}
+
+static const ARMCPRegInfo mpamsm_el1_reginfo = {
+    .name = "MPAMSM_EL1", .state = ARM_CP_STATE_AA64,
+    .opc0 = 3, .opc1 = 0, .crn = 0xa, .crm = 5, .opc2 = 3,
+    .access = PL1_RW,
+    .accessfn = access_mpamsm,
+    .fieldoffset = offsetof(CPUARMState, mpamsm_el1),
+    .resetvalue = 0,
+    .writefn = mpamsm_el1_write, .raw_writefn = raw_write,
+};
+
 void register_cp_regs_for_features(ARMCPU *cpu)
 {
     /* Register all the coprocessor registers based on feature bits */
@@ -7858,6 +7887,7 @@ void register_cp_regs_for_features(ARMCPU *cpu)
 
     if (cpu_isar_feature(aa64_sme, cpu)) {
         define_arm_cp_regs(cpu, sme_reginfo);
+        define_one_arm_cp_reg(cpu, &mpamsm_el1_reginfo);
     }
     if (cpu_isar_feature(aa64_pauth, cpu)) {
         define_arm_cp_regs(cpu, pauth_reginfo);

@@ -8,6 +8,9 @@
 #include "qemu/osdep.h"
 #include "qapi/error.h"
 #include "qemu/log.h"
+#include "qemu/timer.h"
+#include "qemu/host-utils.h"
+#include "qemu/bitops.h"
 #include "hw/core/irq.h"
 #include "hw/core/qdev-properties.h"
 #include "hw/core/registerfields.h"
@@ -417,6 +420,64 @@ static MpamMbwuMon *mpam_mbwu_mon(MPAMMSCState *s, Mpamf *mf)
     return &mf->mbwu_mons[mon];
 }
 
+/*
+ * Lazily advance the monitor's counter.  While enabled it accumulates
+ * the nominal bandwidth scaled by the MBW_MAX fraction of the PARTID
+ * the filter selects, so monitor readings track the configured
+ * bandwidth control.
+ */
+static uint64_t mpam_mbwu_value(MPAMMSCState *s, Mpamf *mf, MpamMbwuMon *m)
+{
+    uint64_t v = m->base;
+    int64_t now = qemu_clock_get_ns(QEMU_CLOCK_VIRTUAL);
+    int64_t delta = now - m->t0;
+
+    if (FIELD_EX32(m->ctl, MSMON_CFG_MBWU_CTL, EN) && delta > 0) {
+        /*
+         * Scale the configured bandwidth by the partition fraction.
+         * Convert to MB/s first so the muldiv64() intermediate stays
+         * in range; the ns -> bytes conversion below accounts for it.
+         */
+        uint64_t rate_mbs = s->bw_nominal_bps / 1000000;
+
+        if (FIELD_EX32(m->ctl, MSMON_CFG_MBWU_CTL, MATCH_PARTID)) {
+            uint32_t partid = FIELD_EX32(m->flt, MSMON_CFG_MBWU_FLT,
+                                         PARTID);
+            uint32_t nrw = mpam_nrw_id_for(s, mf, partid);
+            MpamfPerNrwId *cfg = &mf->per_nrw_id[nrw];
+            uint64_t frac_num, frac_den;
+
+            /*
+             * The configured bandwidth comes from either MBW_MAX or,
+             * on classes that advertise MBW_PBM, the PBM bitmap
+             * (popcount of the programmed bits over its width).
+             */
+            if (cfg->cfg_mbw_pbm[0]) {
+                frac_num = __builtin_popcount(cfg->cfg_mbw_pbm[0] &
+                                     ((1u << MPAM_MBW_PART) - 1));
+                frac_den = MPAM_MBW_PART;
+            } else {
+                /* MBW_MAX is a 16-bit fraction; 0xffff = full bandwidth. */
+                frac_num = cfg->cfg_mbw_max & 0xffff;
+                frac_den = 0xffff;
+            }
+            rate_mbs = muldiv64(rate_mbs, frac_num, frac_den);
+        }
+
+        /* rate_mbs is MB/s and delta is ns: ns * MB/s / 1000 = bytes. */
+        v += muldiv64(delta, rate_mbs, 1000);
+        /* 48-bit counter wraps (MSMON_MBWU_L is 48 bits of value). */
+        if (v > (1ULL << 48)) {
+            m->oflow = true;
+            v &= (1ULL << 48) - 1;
+        }
+    }
+    m->base = v;
+    m->t0 = now;
+
+    return v;
+}
+
 typedef struct MPAMMSCMemState {
     MPAMMSCState parent;
 } MPAMMSCMemState;
@@ -455,6 +516,20 @@ static bool mpam_has_mbwu_mon(Mpamf *mf)
     return FIELD_EX32(mf->idr, MPAMF_IDR, HAS_MSMON) &&
            FIELD_EX32(mf->msmon_idr, MPAMF_MSMON_IDR, MSMON_MBWU);
 }
+
+static const VMStateDescription vmstate_mpam_mbwu_mon = {
+    .name = "mpam/mbwu-mon",
+    .version_id = 1,
+    .minimum_version_id = 1,
+    .fields = (const VMStateField[]) {
+        VMSTATE_UINT32(flt, MpamMbwuMon),
+        VMSTATE_UINT32(ctl, MpamMbwuMon),
+        VMSTATE_UINT64(base, MpamMbwuMon),
+        VMSTATE_INT64(t0, MpamMbwuMon),
+        VMSTATE_BOOL(oflow, MpamMbwuMon),
+        VMSTATE_END_OF_LIST()
+    },
+};
 
 static const VMStateDescription vmstate_mpamf_per_nrw_id = {
     .name = "mpam/per-nrw-id",
@@ -505,6 +580,10 @@ static const VMStateDescription vmstate_mpamf = {
                                              num_int_partid_vm,
                                              vmstate_mpamf_per_nrw_id,
                                              MpamfPerNrwId),
+        VMSTATE_STRUCT_VARRAY_POINTER_UINT32(mbwu_mons, Mpamf,
+                                             num_mbwu_mon_vm,
+                                             vmstate_mpam_mbwu_mon,
+                                             MpamMbwuMon),
         VMSTATE_END_OF_LIST()
     },
 };
@@ -622,16 +701,78 @@ static uint64_t mpam_msc_read_reg(void *opaque, hwaddr offset,
         }
         return s->mon_sel;
     case A_MSMON_CFG_MBWU_FLT:
+        if (!mpam_has_mbwu_mon(mpamf)) {
+            qemu_log_mask(LOG_UNIMP,
+                "MPAM: Unexpected read of MBWU_FLT with no MBWU monitor\n");
+            return 0;
+        }
         return mpam_mbwu_mon(s, mpam_mon_ris(s))->flt;
     case A_MSMON_CFG_MBWU_CTL:
     {
-        MpamMbwuMon *m = mpam_mbwu_mon(s, mpam_mon_ris(s));
-        uint32_t ctl = m->ctl;
+        MpamMbwuMon *m;
 
-        if (m->oflow) {
-            ctl |= R_MSMON_CFG_MBWU_CTL_OFLOW_STATUS_MASK;
+        if (!mpam_has_mbwu_mon(mpamf)) {
+            qemu_log_mask(LOG_UNIMP,
+                "MPAM: Unexpected read of MBWU_CTL with no MBWU monitor\n");
+            return 0;
         }
-        return ctl;
+        m = mpam_mbwu_mon(s, mpam_mon_ris(s));
+        {
+            uint32_t ctl = m->ctl;
+
+            if (m->oflow) {
+                ctl |= R_MSMON_CFG_MBWU_CTL_OFLOW_STATUS_MASK;
+            }
+            return ctl;
+        }
+    }
+    case A_MSMON_MBWU ... (A_MSMON_MBWU + 3):
+    {
+        uint64_t v;
+
+        if (!mpam_has_mbwu_mon(mpamf)) {
+            return 0;
+        }
+        v = mpam_mbwu_value(s, mpam_mon_ris(s),
+                            mpam_mbwu_mon(s, mpam_mon_ris(s)));
+
+        return extract64(v, (offset - A_MSMON_MBWU) * 8, 32);
+    }
+    case A_MSMON_MBWU_L ... (A_MSMON_MBWU_L + 7):
+    {
+        uint64_t v;
+
+        if (!mpam_has_mbwu_mon(mpamf)) {
+            return 0;
+        }
+        v = mpam_mbwu_value(s, mpam_mon_ris(s),
+                            mpam_mbwu_mon(s, mpam_mon_ris(s)));
+
+        return extract64(v, (offset - A_MSMON_MBWU_L) * 8, 32);
+    }
+    case A_MSMON_MBWU_CAPTURE ... (A_MSMON_MBWU_CAPTURE + 3):
+    {
+        uint64_t v;
+
+        if (!mpam_has_mbwu_mon(mpamf)) {
+            return 0;
+        }
+        v = mpam_mbwu_value(s, mpam_mon_ris(s),
+                            mpam_mbwu_mon(s, mpam_mon_ris(s)));
+
+        return (uint32_t)v;
+    }
+    case A_MSMON_MBWU_CAPTURE_L ... (A_MSMON_MBWU_CAPTURE_L + 7):
+    {
+        uint64_t v;
+
+        if (!mpam_has_mbwu_mon(mpamf)) {
+            return 0;
+        }
+        v = mpam_mbwu_value(s, mpam_mon_ris(s),
+                            mpam_mbwu_mon(s, mpam_mon_ris(s)));
+
+        return extract64(v, (offset - A_MSMON_MBWU_CAPTURE_L) * 8, 32);
     }
     case A_MPAMF_ERR_MSI_MPAM:
         return mpamf->err_msi_mpam;
@@ -994,7 +1135,14 @@ static void mpam_msc_write_reg(void *opaque, hwaddr offset, uint64_t value,
         return;
     case A_MSMON_CFG_MBWU_CTL:
     {
-        MpamMbwuMon *m = mpam_mbwu_mon(s, mpam_mon_ris(s));
+        MpamMbwuMon *m;
+
+        if (!mpam_has_mbwu_mon(mpamf)) {
+            qemu_log_mask(LOG_UNIMP,
+                          "MPAM: Unexpected write to MBWU_CTL with no MBWU monitor\n");
+            return;
+        }
+        m = mpam_mbwu_mon(s, mpam_mon_ris(s));
 
         m->ctl = value & (R_MSMON_CFG_MBWU_CTL_TYPE_MASK |
                           R_MSMON_CFG_MBWU_CTL_MATCH_PARTID_MASK |
@@ -1009,6 +1157,22 @@ static void mpam_msc_write_reg(void *opaque, hwaddr offset, uint64_t value,
         if (value & R_MSMON_CFG_MBWU_CTL_OFLOW_STATUS_MASK) {
             m->oflow = false;               /* write-one-to-clear */
         }
+        return;
+    }
+    case A_MSMON_MBWU:
+    case A_MSMON_MBWU_L:
+    case A_MSMON_MBWU_CAPTURE:
+    case A_MSMON_MBWU_CAPTURE_L:
+    {
+        MpamMbwuMon *m;
+
+        if (!mpam_has_mbwu_mon(mpamf)) {
+            return;
+        }
+        m = mpam_mbwu_mon(s, mpam_mon_ris(s));
+
+        m->base = 0;
+        m->t0 = qemu_clock_get_ns(QEMU_CLOCK_VIRTUAL);
         return;
     }
     case A_MSMON_CAPT_EVNT:
@@ -1072,6 +1236,15 @@ static void mpam_msc_state_init(MPAMMSCState *s)
         memset(mpamf->mbwu_mons, 0,
                sizeof(MpamMbwuMon) * s->num_mbwu_mon);
         /*
+         * t0 is a virtual-clock timestamp; zero is a valid value (the
+         * clock starts at zero), so initialise it explicitly rather than
+         * treating zero as "unset" on the first read.
+         */
+        for (int m = 0; m < s->num_mbwu_mon; m++) {
+            mpamf->mbwu_mons[m].t0 =
+                qemu_clock_get_ns(QEMU_CLOCK_VIRTUAL);
+        }
+        /*
          * Until software programs the map, wrap each request PARTID onto an
          * internal PARTID so the narrowing indirection is always in range.
          */
@@ -1117,6 +1290,14 @@ static bool mpam_msc_realize(DeviceState *dev, Error **errp)
         return false;
     }
 
+    /*
+     * A memory-side MSC always advertises an MBWU monitor, and both
+     * subtypes allocate the array, so it must not be empty.
+     */
+    if (s->num_mbwu_mon < 1 || s->num_mbwu_mon > 65536) {
+        error_setg(errp, "num-mbwu-mon must be in the range 1..65536");
+        return false;
+    }
     s->num_ris_vm = s->num_ris;
     s->mpamf = g_new0(Mpamf, s->num_ris);
     for (int i = 0; i < s->num_ris; i++) {
@@ -1124,6 +1305,7 @@ static bool mpam_msc_realize(DeviceState *dev, Error **errp)
         s->mpamf[i].num_int_partid_vm = s->num_int_partid;
         s->mpamf[i].per_nrw_id = g_new0(MpamfPerNrwId, s->num_int_partid);
         s->mpamf[i].cfg_intpartid = g_new0(uint32_t, s->num_partid);
+        s->mpamf[i].num_mbwu_mon_vm = s->num_mbwu_mon;
         s->mpamf[i].mbwu_mons = g_new0(MpamMbwuMon, s->num_mbwu_mon);
     }
 
@@ -1161,7 +1343,7 @@ static void mpam_msc_mem_realize(DeviceState *dev, Error **errp)
 
         /* We won't implement any implementation specific stuff */
         mpamf->idr = FIELD_DP64(mpamf->idr, MPAMF_IDR, NO_IMPL_PART, 1);
-        mpamf->idr = FIELD_DP64(mpamf->idr, MPAMF_IDR, NO_IMPL_MSMON, 1);
+        mpamf->idr = FIELD_DP64(mpamf->idr, MPAMF_IDR, HAS_MSMON, 1);
         /* Memory specific bit */
         mpamf->idr = FIELD_DP64(mpamf->idr, MPAMF_IDR, HAS_MBW_PART, 1);
         /*
@@ -1175,6 +1357,18 @@ static void mpam_msc_mem_realize(DeviceState *dev, Error **errp)
                                     INTPRI_0_IS_LOW, 1);
         mpamf->pri_idr = FIELD_DP32(mpamf->pri_idr, MPAMF_PRI_IDR,
                                     INTPRI_WD, 2);
+
+        mpamf->msmon_idr = FIELD_DP32(mpamf->msmon_idr,
+                                      MPAMF_MSMON_IDR, MSMON_MBWU, 1);
+        mpamf->msmon_idr = FIELD_DP32(mpamf->msmon_idr,
+                                      MPAMF_MSMON_IDR, HAS_OFLOW_SR, 1);
+        mpamf->mbwumon_idr = FIELD_DP32(mpamf->mbwumon_idr,
+                                        MPAMF_MBWUMON_IDR, NUM_MON,
+                                        s->num_mbwu_mon);
+        mpamf->mbwumon_idr = FIELD_DP32(mpamf->mbwumon_idr,
+                                        MPAMF_MBWUMON_IDR, HAS_LONG, 1);
+        mpamf->mbwumon_idr = FIELD_DP32(mpamf->mbwumon_idr,
+                                        MPAMF_MBWUMON_IDR, HAS_RWBW, 1);
 
         mpamf->iidr = FIELD_DP64(mpamf->iidr, MPAMF_IIDR, IMPLEMENTER,
                                  MPAM_IIDR_IMPLEMENTER);
@@ -1230,10 +1424,22 @@ static void mpam_msc_cache_realize(DeviceState *dev, Error **errp)
 
         /* We won't implement any implementation specific stuff */
         mpamf->idr = FIELD_DP64(mpamf->idr, MPAMF_IDR, NO_IMPL_PART, 1);
-        mpamf->idr = FIELD_DP64(mpamf->idr, MPAMF_IDR, NO_IMPL_MSMON, 1);
+        mpamf->idr = FIELD_DP64(mpamf->idr, MPAMF_IDR, HAS_MSMON, 1);
 
         /* Need to implement for RME */
         mpamf->idr = FIELD_DP64(mpamf->idr, MPAMF_IDR, SP4, 0);
+
+        mpamf->msmon_idr = FIELD_DP32(mpamf->msmon_idr,
+                                      MPAMF_MSMON_IDR, MSMON_MBWU, 1);
+        mpamf->msmon_idr = FIELD_DP32(mpamf->msmon_idr,
+                                      MPAMF_MSMON_IDR, HAS_OFLOW_SR, 1);
+        mpamf->mbwumon_idr = FIELD_DP32(mpamf->mbwumon_idr,
+                                        MPAMF_MBWUMON_IDR, NUM_MON,
+                                        s->num_mbwu_mon);
+        mpamf->mbwumon_idr = FIELD_DP32(mpamf->mbwumon_idr,
+                                        MPAMF_MBWUMON_IDR, HAS_LONG, 1);
+        mpamf->mbwumon_idr = FIELD_DP32(mpamf->mbwumon_idr,
+                                        MPAMF_MBWUMON_IDR, HAS_RWBW, 1);
 
         /* Cache specific bit */
         mpamf->idr = FIELD_DP64(mpamf->idr, MPAMF_IDR, HAS_CPOR_PART, 1);

@@ -274,6 +274,10 @@ typedef struct MPAMMSCState {
 
 } MPAMMSCState;
 
+typedef struct MPAMMSCMemState {
+    MPAMMSCState parent;
+} MPAMMSCMemState;
+
 DECLARE_INSTANCE_CHECKER(MPAMMSCState, MPAM_MSC_DEVICE, TYPE_MPAM_MSC);
 
 static bool mpam_has_csu_mon(Mpamf *mf)
@@ -331,6 +335,8 @@ static const VMStateDescription vmstate_mpam_msc = {
         VMSTATE_END_OF_LIST()
     },
 };
+DECLARE_INSTANCE_CHECKER(MPAMMSCMemState, MPAM_MSC_MEM_DEVICE,
+                         TYPE_MPAM_MSC_MEM);
 
 static uint64_t mpam_msc_read_reg(void *opaque, hwaddr offset,
                                   unsigned size)
@@ -476,6 +482,52 @@ static bool mpam_msc_realize(DeviceState *dev, Error **errp)
     return true;
 }
 
+static void mpam_msc_mem_realize(DeviceState *dev, Error **errp)
+{
+    MPAMMSCState *s = MPAM_MSC_DEVICE(dev);
+
+    if (!mpam_msc_realize(dev, errp)) {
+        return;
+    }
+
+    for (int i = 0; i < s->num_ris; i++) {
+        Mpamf *mpamf = &s->mpamf[i];
+
+        mpamf->idr = FIELD_DP64(mpamf->idr, MPAMF_IDR, PARTID_MAX,
+                                s->num_partid - 1);
+        /* No PCMG for now */
+        mpamf->idr = FIELD_DP64(mpamf->idr, MPAMF_IDR, PMG_MAX, 0);
+        mpamf->idr = FIELD_DP64(mpamf->idr, MPAMF_IDR, EXT, 1);
+        mpamf->idr = FIELD_DP64(mpamf->idr, MPAMF_IDR, HAS_RIS, s->num_ris > 1);
+        mpamf->idr = FIELD_DP64(mpamf->idr, MPAMF_IDR, RIS_MAX,
+                                  s->num_ris > 1 ? s->num_ris - 1 : 0);
+        mpamf->idr = FIELD_DP64(mpamf->idr, MPAMF_IDR, HAS_ESR, 1);
+        mpamf->idr = FIELD_DP64(mpamf->idr, MPAMF_IDR, HAS_EXTD_ESR, 1);
+        mpamf->idr = FIELD_DP64(mpamf->idr, MPAMF_IDR, HAS_PARTID_NRW,
+                                s->num_int_partid < s->num_partid);
+
+        /* We won't implement any implementation specific stuff */
+        mpamf->idr = FIELD_DP64(mpamf->idr, MPAMF_IDR, NO_IMPL_PART, 1);
+        mpamf->idr = FIELD_DP64(mpamf->idr, MPAMF_IDR, NO_IMPL_MSMON, 1);
+
+        mpamf->iidr = FIELD_DP64(mpamf->iidr, MPAMF_IIDR, IMPLEMENTER,
+                                 MPAM_IIDR_IMPLEMENTER);
+        mpamf->iidr = FIELD_DP64(mpamf->iidr, MPAMF_IIDR, REVISION, 0);
+        mpamf->iidr = FIELD_DP64(mpamf->iidr, MPAMF_IIDR, VARIANT, 0);
+        mpamf->iidr = FIELD_DP64(mpamf->iidr, MPAMF_IIDR, PRODUCT_ID, 'Q');
+
+        mpamf->aidr = FIELD_DP64(mpamf->aidr, MPAMF_AIDR, ARCH_MINOR_REV, 1);
+        mpamf->aidr = FIELD_DP64(mpamf->aidr, MPAMF_AIDR, ARCH_MAJOR_REV, 1);
+
+        if (s->num_int_partid < s->num_partid) {
+            mpamf->partid_nrw_idr = FIELD_DP32(mpamf->partid_nrw_idr,
+                                               MPAMF_PARTID_NRW_IDR,
+                                               INTPARTID_MAX,
+                                               s->num_int_partid - 1);
+        }
+    }
+}
+
 static const Property mpam_msc_props[] = {
     DEFINE_PROP_UINT8("num-ris", MPAMMSCState, num_ris, 1),
     DEFINE_PROP_UINT32("num-partid", MPAMMSCState, num_partid, 1),
@@ -493,6 +545,13 @@ static void mpam_msc_init(ObjectClass *klass, const void *data)
     device_class_set_legacy_reset(dc, mpam_msc_reset);
 }
 
+static void mpam_msc_mem_init(ObjectClass *klass, const void *data)
+{
+    DeviceClass *dc = DEVICE_CLASS(klass);
+
+    dc->realize = mpam_msc_mem_realize;
+}
+
 static const TypeInfo mpam_msc_info = {
     .name = TYPE_MPAM_MSC,
     .parent = TYPE_SYS_BUS_DEVICE,
@@ -500,8 +559,16 @@ static const TypeInfo mpam_msc_info = {
     .class_init = mpam_msc_init
 };
 
+static const TypeInfo mpam_msc_mem_info = {
+    .name = TYPE_MPAM_MSC_MEM,
+    .parent = TYPE_MPAM_MSC,
+    .instance_size = sizeof(MPAMMSCMemState),
+    .class_init = mpam_msc_mem_init
+};
+
 static void mpam_register_types(void)
 {
     type_register_static(&mpam_msc_info);
+    type_register_static(&mpam_msc_mem_info);
 }
 type_init(mpam_register_types);

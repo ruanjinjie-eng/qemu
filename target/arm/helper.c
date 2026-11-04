@@ -6534,6 +6534,24 @@ static const ARMCPRegInfo fgwte3_reginfo[] = {
     },
 };
 
+/*
+ * The emulated PE implements MPAM v1.0 (ID_AA64PFR0_EL1.MPAM == 1 and
+ * ID_AA64PFR1_EL1.MPAM_FRAC == 0). Table D21-3 makes HAS_TIDR, HAS_ALTSP
+ * and HAS_FORCE_NS prohibited for v1.0, so MPAMIDR_EL1 reports them as
+ * zero and the fields they would have added are RES0.
+ */
+#define MPAM2_EL2_VALID_MASK \
+    (R_MPAM2_EL2_MPAMEN_MASK | R_MPAM2_EL2_EnMPAMSM_MASK | \
+     R_MPAM2_EL2_TRAPMPAM0EL1_MASK | R_MPAM2_EL2_TRAPMPAM1EL1_MASK | \
+     R_MPAM2_EL2_PMG_D_MASK | R_MPAM2_EL2_PMG_I_MASK | \
+     R_MPAM2_EL2_PARTID_D_MASK | R_MPAM2_EL2_PARTID_I_MASK)
+
+static void mpam2_el2_write(CPUARMState *env, const ARMCPRegInfo *ri,
+                            uint64_t value)
+{
+    raw_write(env, ri, value & MPAM2_EL2_VALID_MASK);
+}
+
 void register_cp_regs_for_features(ARMCPU *cpu)
 {
     /* Register all the coprocessor registers based on feature bits */
@@ -6907,6 +6925,12 @@ void register_cp_regs_for_features(ARMCPU *cpu)
               .access = PL1_R, .type = ARM_CP_CONST,
               .accessfn = access_tid3,
               .resetvalue = cpu->isar.mvfr0 },
+            { .name = "MPAM2_EL2", .state = ARM_CP_STATE_AA64,
+              .opc0 = 3, .opc1 = 4, .crn = 0xa, .crm = 5, .opc2 = 0,
+              .access = PL2_RW,
+              .fieldoffset = offsetof(CPUARMState, mpam2_el2),
+              .resetvalue = R_MPAM2_EL2_MPAMEN_MASK,
+              .writefn = mpam2_el2_write, .raw_writefn = raw_write },
             { .name = "MVFR1_EL1", .state = ARM_CP_STATE_AA64,
               .opc0 = 3, .opc1 = 0, .crn = 0, .crm = 3, .opc2 = 1,
               .access = PL1_R, .type = ARM_CP_CONST,

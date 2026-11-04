@@ -323,6 +323,19 @@ typedef struct MPAMMSCCacheState {
 
 DECLARE_INSTANCE_CHECKER(MPAMMSCState, MPAM_MSC_DEVICE, TYPE_MPAM_MSC);
 
+/*
+ * IHI 0099 9.4: a width-reported fraction field occupies the most
+ * significant 'wd' bits of its 16-bit field; the remaining low bits are
+ * RAZ/WI.  Returns the mask of bits software is allowed to set.
+ */
+static uint32_t mpam_fracwd_mask(uint32_t wd)
+{
+    if (wd >= 16) {
+        return 0xffffu;
+    }
+    return ~((1u << (16 - wd)) - 1) & 0xffffu;
+}
+
 static bool mpam_has_csu_mon(Mpamf *mf)
 {
     return FIELD_EX32(mf->idr, MPAMF_IDR, HAS_MSMON) &&
@@ -456,6 +469,8 @@ static uint64_t mpam_msc_read_reg(void *opaque, hwaddr offset,
             return 0;
         }
         return mpamf->cpor_idr;
+    case A_MPAMF_MBW_IDR:
+        return mpamf->mbw_idr;
     case A_MPAMF_PARTID_NRW_IDR: {
         return mpamf->partid_nrw_idr;
     }
@@ -480,6 +495,30 @@ static uint64_t mpam_msc_read_reg(void *opaque, hwaddr offset,
         return mpamf->mbwumon_idr;
     case A_MPAMCFG_PART_SEL:
         return mpamf->cfg_part_sel;
+    case A_MPAMF_MPAMCFG_MBW_MIN:
+        if (!FIELD_EX32(mpamf->idr, MPAMF_IDR, HAS_MBW_PART) ||
+            !FIELD_EX32(mpamf->mbw_idr, MPAMF_MBW_IDR, HAS_MIN)) {
+            qemu_log_mask(LOG_UNIMP,
+                "MPAM: Unexpected read of MBW_MIN with no MBW_MIN support\n");
+            return 0;
+        }
+        return mpamf->per_nrw_id[nrw_part_sel].cfg_mbw_min;
+    case A_MPAMF_MPAMCFG_MBW_MAX:
+        if (!FIELD_EX32(mpamf->idr, MPAMF_IDR, HAS_MBW_PART) ||
+            !FIELD_EX32(mpamf->mbw_idr, MPAMF_MBW_IDR, HAS_MAX)) {
+            qemu_log_mask(LOG_UNIMP,
+                "MPAM: Unexpected read of MBW_MAX with no MBW_MAX support\n");
+            return 0;
+        }
+        return mpamf->per_nrw_id[nrw_part_sel].cfg_mbw_max;
+    case A_MPAMF_MPAMCFG_MBW_PROP:
+        if (!FIELD_EX32(mpamf->idr, MPAMF_IDR, HAS_MBW_PART) ||
+            !FIELD_EX32(mpamf->mbw_idr, MPAMF_MBW_IDR, HAS_PROP)) {
+            qemu_log_mask(LOG_UNIMP,
+                "MPAM: Unexpected read of MBW_PROP with no MBW_PROP support\n");
+            return 0;
+        }
+        return mpamf->per_nrw_id[nrw_part_sel].cfg_mbw_prop;
     case A_MPAMF_MPAMCFG_CPBM0...
         (A_MPAMF_MPAMCFG_CPBM0 + ((MPAM_CACHE_PART + 31) / 32 - 1) * 4):
     {
@@ -492,6 +531,20 @@ static uint64_t mpam_msc_read_reg(void *opaque, hwaddr offset,
         }
         array_offset = (offset - A_MPAMF_MPAMCFG_CPBM0) / sizeof(uint32_t);
         return mpamf->per_nrw_id[nrw_part_sel].cfg_cpbm[array_offset];
+    }
+    case A_MPAMF_MPAMCFG_MBW_PBM0...
+            (A_MPAMF_MPAMCFG_MBW_PBM0 + ((MPAM_MBW_PART + 31) / 32 - 1) * 4):
+    {
+        uint32_t array_offset;
+
+        if (!FIELD_EX32(mpamf->idr, MPAMF_IDR, HAS_MBW_PART) ||
+            !FIELD_EX32(mpamf->mbw_idr, MPAMF_MBW_IDR, HAS_PBM)) {
+            qemu_log_mask(LOG_UNIMP,
+                "MPAM: Unexpected read of MBW_PBM with no MBW_PBM support\n");
+            return 0;
+        }
+        array_offset = (offset - A_MPAMF_MPAMCFG_MBW_PBM0) / sizeof(uint32_t);
+        return mpamf->per_nrw_id[nrw_part_sel].cfg_mbw_pbm[array_offset];
     }
     default:
         qemu_log_mask(LOG_UNIMP,
@@ -536,6 +589,68 @@ static void mpam_msc_write_reg(void *opaque, hwaddr offset, uint64_t value,
         mpamf = &s->mpamf[s->ris];
         mpamf->cfg_part_sel = value & MPAMCFG_PART_SEL_WRITE_MASK;
         return;
+    case A_MPAMF_MPAMCFG_MBW_MIN:
+    {
+        uint32_t wd, valid;
+
+        if (!FIELD_EX32(mpamf->idr, MPAMF_IDR, HAS_MBW_PART) ||
+            !FIELD_EX32(mpamf->mbw_idr, MPAMF_MBW_IDR, HAS_MIN)) {
+            qemu_log_mask(LOG_UNIMP,
+                          "MPAM: Unexpected write to MBW_MIN when not supported\n");
+            return;
+        }
+        wd = FIELD_EX32(mpamf->mbw_idr, MPAMF_MBW_IDR, BWA_WD);
+        valid = mpam_fracwd_mask(wd);
+        if (value & ~valid) {
+            qemu_log_mask(LOG_UNIMP,
+                          "MPAM: Unexpected write to MBW_MIN Mask=%x Value=%lx\n",
+                          valid, value);
+        }
+        mpamf->per_nrw_id[nrw_part_sel].cfg_mbw_min = value & valid;
+        return;
+    }
+    case A_MPAMF_MPAMCFG_MBW_MAX:
+    {
+        uint32_t wd, valid;
+
+        if (!FIELD_EX32(mpamf->idr, MPAMF_IDR, HAS_MBW_PART) ||
+            !FIELD_EX32(mpamf->mbw_idr, MPAMF_MBW_IDR, HAS_MAX)) {
+            qemu_log_mask(LOG_UNIMP,
+                          "MPAM: Unexpected write to MBW_MAX when not supported\n");
+            return;
+        }
+        wd = FIELD_EX32(mpamf->mbw_idr, MPAMF_MBW_IDR, BWA_WD);
+        valid = mpam_fracwd_mask(wd) |
+                R_MPAMF_MPAMCFG_MBW_MAX_HARDLIM_MASK;
+        if (value & ~valid) {
+            qemu_log_mask(LOG_UNIMP,
+                          "MPAM: Unexpected write to MBW_MAX Mask=%x Value=%lx\n",
+                          valid, value);
+        }
+        mpamf->per_nrw_id[nrw_part_sel].cfg_mbw_max = value & valid;
+        return;
+    }
+    case A_MPAMF_MPAMCFG_MBW_PROP:
+    {
+        uint32_t wd, valid;
+
+        if (!FIELD_EX32(mpamf->idr, MPAMF_IDR, HAS_MBW_PART) ||
+            !FIELD_EX32(mpamf->mbw_idr, MPAMF_MBW_IDR, HAS_PROP)) {
+            qemu_log_mask(LOG_UNIMP,
+                          "MPAM: Unexpected write to MBW_PROP when not supported\n");
+            return;
+        }
+        wd = FIELD_EX32(mpamf->mbw_idr, MPAMF_MBW_IDR, BWA_WD);
+        valid = mpam_fracwd_mask(wd) |
+                R_MPAMF_MPAMCFG_MBW_PROP_EN_MASK;
+        if (value & ~valid) {
+            qemu_log_mask(LOG_UNIMP,
+                          "MPAM: Unexpected write to MBW_PROP Mask=%x Value=%lx\n",
+                          valid, value);
+        }
+        mpamf->per_nrw_id[nrw_part_sel].cfg_mbw_prop = value & valid;
+        return;
+    }
     case A_MPAMF_MPAMCFG_CPBM0...
         (A_MPAMF_MPAMCFG_CPBM0 + ((MPAM_CACHE_PART + 31) / 32 - 1) * 4):
     {
@@ -562,6 +677,37 @@ static void mpam_msc_write_reg(void *opaque, hwaddr offset, uint64_t value,
             mask = cpbm_wd - bit >= 32 ? UINT32_MAX :
                    (uint32_t)MAKE_64BIT_MASK(0, cpbm_wd - bit);
             mpamf->per_nrw_id[nrw_part_sel].cfg_cpbm[array_offset] =
+                value & mask;
+        }
+        return;
+    }
+    case A_MPAMF_MPAMCFG_MBW_PBM0...
+        (A_MPAMF_MPAMCFG_MBW_PBM0 + ((MPAM_MBW_PART + 31) / 32 - 1) * 4):
+    {
+        uint32_t array_offset;
+
+        if (!FIELD_EX32(mpamf->idr, MPAMF_IDR, HAS_MBW_PART) ||
+            !FIELD_EX32(mpamf->mbw_idr, MPAMF_MBW_IDR, HAS_PBM)) {
+            qemu_log_mask(LOG_UNIMP,
+                          "MPAM: Unexpected write to MBW_PBM when not supported\n");
+            return;
+        }
+        array_offset = (offset - A_MPAMF_MPAMCFG_MBW_PBM0) / sizeof(uint32_t);
+        {
+            uint32_t wd = FIELD_EX32(mpamf->mbw_idr,
+                                     MPAMF_MBW_IDR, BWPBM_WD);
+            uint32_t bit = array_offset * 32;
+            uint32_t mask;
+
+            if (bit >= wd) {
+                qemu_log_mask(LOG_GUEST_ERROR,
+                              "MPAM: MBW_PBM%d out of range (BWPBM_WD %u)\n",
+                              array_offset, wd);
+                return;
+            }
+            mask = wd - bit >= 32 ? UINT32_MAX :
+                   (uint32_t)MAKE_64BIT_MASK(0, wd - bit);
+            mpamf->per_nrw_id[nrw_part_sel].cfg_mbw_pbm[array_offset] =
                 value & mask;
         }
         return;
@@ -679,6 +825,8 @@ static void mpam_msc_mem_realize(DeviceState *dev, Error **errp)
         /* We won't implement any implementation specific stuff */
         mpamf->idr = FIELD_DP64(mpamf->idr, MPAMF_IDR, NO_IMPL_PART, 1);
         mpamf->idr = FIELD_DP64(mpamf->idr, MPAMF_IDR, NO_IMPL_MSMON, 1);
+        /* Memory specific bit */
+        mpamf->idr = FIELD_DP64(mpamf->idr, MPAMF_IDR, HAS_MBW_PART, 1);
 
         mpamf->iidr = FIELD_DP64(mpamf->iidr, MPAMF_IIDR, IMPLEMENTER,
                                  MPAM_IIDR_IMPLEMENTER);
@@ -688,6 +836,16 @@ static void mpam_msc_mem_realize(DeviceState *dev, Error **errp)
 
         mpamf->aidr = FIELD_DP64(mpamf->aidr, MPAMF_AIDR, ARCH_MINOR_REV, 1);
         mpamf->aidr = FIELD_DP64(mpamf->aidr, MPAMF_AIDR, ARCH_MAJOR_REV, 1);
+
+        mpamf->mbw_idr = FIELD_DP32(mpamf->mbw_idr, MPAMF_MBW_IDR, BWA_WD, 16);
+        mpamf->mbw_idr = FIELD_DP32(mpamf->mbw_idr, MPAMF_MBW_IDR, HAS_MIN, 1);
+        mpamf->mbw_idr = FIELD_DP32(mpamf->mbw_idr, MPAMF_MBW_IDR, HAS_MAX, 1);
+        mpamf->mbw_idr = FIELD_DP32(mpamf->mbw_idr, MPAMF_MBW_IDR, HAS_PBM, 1);
+        mpamf->mbw_idr = FIELD_DP32(mpamf->mbw_idr, MPAMF_MBW_IDR, HAS_PROP, 1);
+
+        mpamf->mbw_idr = FIELD_DP32(mpamf->mbw_idr, MPAMF_MBW_IDR, WINDWR, 0);
+        mpamf->mbw_idr = FIELD_DP32(mpamf->mbw_idr, MPAMF_MBW_IDR,
+                                    BWPBM_WD, MPAM_MBW_PART);
 
         if (s->num_int_partid < s->num_partid) {
             mpamf->partid_nrw_idr = FIELD_DP32(mpamf->partid_nrw_idr,

@@ -72,6 +72,7 @@ REG32(MPAMF_CCAP_IDR, 0x0038)
 
 REG32(MPAMF_MBW_IDR, 0x0040)
     FIELD(MPAMF_MBW_IDR, BWA_WD, 0, 6)
+    FIELD(MPAMF_MBW_IDR, MAX_LIM, 8, 2)
     FIELD(MPAMF_MBW_IDR, HAS_MIN, 10, 1)
     FIELD(MPAMF_MBW_IDR, HAS_MAX, 11, 1)
     FIELD(MPAMF_MBW_IDR, HAS_PBM, 12, 1)
@@ -370,6 +371,7 @@ typedef struct MPAMMSCState {
     uint8_t num_ris;
     uint32_t num_mbwu_mon;
     uint64_t bw_nominal_bps;
+    uint32_t mbw_max_lim;
     uint32_t num_csu_mon;
     uint64_t csu_capacity;
 
@@ -1940,6 +1942,8 @@ static void mpam_msc_mem_realize(DeviceState *dev, Error **errp)
         mpamf->aidr = FIELD_DP64(mpamf->aidr, MPAMF_AIDR, ARCH_MAJOR_REV, 1);
 
         mpamf->mbw_idr = FIELD_DP32(mpamf->mbw_idr, MPAMF_MBW_IDR, BWA_WD, 16);
+        mpamf->mbw_idr = FIELD_DP32(mpamf->mbw_idr, MPAMF_MBW_IDR, MAX_LIM,
+                                    s->mbw_max_lim);
         mpamf->mbw_idr = FIELD_DP32(mpamf->mbw_idr, MPAMF_MBW_IDR, HAS_MIN, 1);
         mpamf->mbw_idr = FIELD_DP32(mpamf->mbw_idr, MPAMF_MBW_IDR, HAS_MAX, 1);
         mpamf->mbw_idr = FIELD_DP32(mpamf->mbw_idr, MPAMF_MBW_IDR, HAS_PBM, 1);
@@ -2068,6 +2072,8 @@ static const Property mpam_msc_props[] = {
     DEFINE_PROP_UINT32("num-mbwu-mon", MPAMMSCState, num_mbwu_mon, 8),
     DEFINE_PROP_UINT64("bw-nominal-bps", MPAMMSCState, bw_nominal_bps,
                        10000000000ULL),  /* 10 GB/s default bandwidth */
+    /* MPAMF_MBW_IDR.MAX_LIM: 0 both, 1 soft only, 2 hard only */
+    DEFINE_PROP_UINT32("mbw-max-lim", MPAMMSCState, mbw_max_lim, 0),
     DEFINE_PROP_LINK("bw-source", MPAMMSCState, bw_source,
                      TYPE_MPAM_MSC, DeviceState *),
     DEFINE_PROP_UINT32("num-csu-mon", MPAMMSCState, num_csu_mon, 4),
